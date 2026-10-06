@@ -220,6 +220,40 @@ function legal(from, si) {
   const c = S.slots[from.si][from.k];
   return !!c && canPlace(c.v, si);
 }
+// Fail kontrolü: eldeki kartlardan biri şimdi ya da board'daki taşımalarla (merge'ler dahil) yerleşebiliyor mu?
+function simMerge(st, i) { while (i > 0 && i < st.length && st[i] === st[i - 1]) { st.splice(i, 1); st[i - 1]++; i--; } }
+function canEscape() {
+  const hand = S.hand.filter(Boolean).map(c => c.v);
+  if (!hand.length) return true;
+  const fits = (sl, v) => sl.some(st => !st.length || st[st.length - 1] === v || st[st.length - 1] === v + 1);
+  const key = sl => sl.map(st => st.join(',')).join('|');
+  const start = S.slots.map(st => st.map(c => c.v));
+  const seen = new Set([key(start)]), q = [start];
+  while (q.length) {
+    if (seen.size > 5000) return true;           // arama çok büyürse oyuncuyu haksız yere bitirme
+    const sl = q.shift();
+    if (hand.some(v => fits(sl, v))) return true;
+    for (let si = 0; si < sl.length; si++) {
+      const st = sl[si];
+      if (!st.length) continue;
+      let k = st.length - 1;
+      while (k > 0 && st[k - 1] === st[k] + 1) k--;
+      const b = st[k];
+      for (let di = 0; di < sl.length; di++) {
+        if (di === si) continue;
+        const d = sl[di], top = d[d.length - 1];
+        if (d.length && top !== b && top !== b + 1) continue;
+        if (!d.length && k === 0) continue;
+        const n = sl.map(x => x.slice());
+        const run = n[si].splice(k), j = n[di].length;
+        n[di].push(...run); simMerge(n[di], j);
+        const kk = key(n);
+        if (!seen.has(kk)) { seen.add(kk); q.push(n); }
+      }
+    }
+  }
+  return false;
+}
 function anyPlaceable() { return S.hand.some(c => c && S.slots.some((_, si) => canPlace(c.v, si))); }
 function cardsOf(from) { return from.type === 'hand' ? [S.hand[from.i]] : S.slots[from.si].slice(from.k); }
 function sameFrom(a, b) {
@@ -286,7 +320,7 @@ function stageUp(cheat = false) {
 }
 function afterMove() {
   if (S.hand.every(c => !c)) deal();
-  if (!anyPlaceable()) {
+  if (!canEscape()) {
     setTimeout(() => { S.over = true; S.overT = 0; S.busy = false; sfx('fail'); vib(80); }, 380);
   } else {
     S.busy = false;
@@ -584,7 +618,7 @@ function drawHelp() {
     [3, 'Matching numbers merge into the next number, and merges chain automatically.'],
     [5, 'Reach the target to clear a stage: the target and new cards go up by 1, and every 3 stages add a slot.'],
     [6, 'Move the front run of consecutive cards (e.g. 1-2-3) to another slot as a group.'],
-    [7, 'If none of the bottom cards fit anywhere, the game ends.']
+    [7, 'If no bottom card can fit, even after moving stacks, the game ends.']
   ];
   let y = 252;
   ctx.font = `500 18px ${FONT}`; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
@@ -605,7 +639,7 @@ function drawOver() {
   ctx.save(); ctx.translate(LW / 2, 460); const sc = 0.85 + 0.15 * easeOutBack(a); ctx.scale(sc, sc); ctx.translate(-LW / 2, -460);
   rr(70, 300, 400, 330, 30); ctx.fillStyle = '#fbf4ec'; ctx.fill();
   text('No moves left', LW / 2, 362, 32, '#7a5a3c', 700);
-  text('None of your cards fit in any slot.', LW / 2, 404, 16, '#a3866a', 500);
+  text('No card fits, even after moving stacks.', LW / 2, 404, 16, '#a3866a', 500);
   text('Stage reached: ' + S.stage, LW / 2, 448, 22, '#8a6a4c', 600);
   text('Best: ' + best, LW / 2, 482, 18, '#b39373', 500);
   const b = OVER_BTN;
