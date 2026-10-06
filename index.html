@@ -1,0 +1,611 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Solitaire Merge</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root { --page: #a89484; --shadow: rgba(60, 40, 25, .35); }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --page: #2e2621; --shadow: rgba(0,0,0,.5); } }
+  :root[data-theme="dark"] { --page: #2e2621; --shadow: rgba(0,0,0,.5); }
+  :root { box-sizing: border-box; padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--page); display: flex; align-items: center; justify-content: center;
+    overflow: hidden; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent;
+  }
+  canvas { display: block; touch-action: none; border-radius: 22px; box-shadow: 0 12px 40px var(--shadow); }
+</style>
+</head>
+<body>
+<canvas id="c" aria-label="Solitaire Merge game"></canvas>
+<script>
+(() => {
+'use strict';
+
+// ---------- Ayarlar (GDD) ----------
+const CFG = {
+  startTarget: 6,   // başlangıç hedef kart
+  startSlots: 4,    // başlangıç slot sayısı
+  handSize: 3,      // altta verilen kart sayısı
+  randGap: 2,       // gelen kartlar hedeften en az 2 küçük
+  slotEvery: 3,     // her 3 aşamada +1 slot
+  maxSlots: 8,      // ekran genişliği sınırı
+  lowBias: true     // küçük kartlar biraz daha sık gelsin
+};
+
+const LW = 540, LH = 960, RATIO = 1.36, HW = 92;
+const FONT = '"Fredoka", "Trebuchet MS", "Segoe UI", system-ui, sans-serif';
+const BOARD = { x: 16, y: 16, w: 508, h: 744 };
+const TRAY  = { x: 16, y: 772, w: 508, h: 172 };
+const BADGE = { x: 134, y: 50 };
+const BTNS = [{ x: 392, y: 54, id: 'help' }, { x: 440, y: 54, id: 'sound' }, { x: 488, y: 54, id: 'restart' }];
+const HELP_BTN = { x: 170, y: 676, w: 200, h: 60 };
+const OVER_BTN = { x: 160, y: 530, w: 220, h: 64 };
+
+const PALETTE = [null,
+  { f: '#f9b8ac', b: '#e97f6f', t: '#df5f4e' }, // 1
+  { f: '#f9cba6', b: '#e9955c', t: '#d6773a' }, // 2
+  { f: '#fbe3a2', b: '#e5b54a', t: '#cf961f' }, // 3
+  { f: '#eff4a6', b: '#bdca3e', t: '#9ead1c' }, // 4
+  { f: '#d5f1a8', b: '#8ecb4e', t: '#67ab2c' }, // 5
+  { f: '#bdedc8', b: '#5cbf7c', t: '#36a159' }, // 6
+  { f: '#b6ecf3', b: '#4dbfd0', t: '#1f9fb2' }, // 7
+  { f: '#bfd5fb', b: '#5f90e5', t: '#3d6fcb' }, // 8
+  { f: '#d5c7fa', b: '#9479e3', t: '#7357cb' }, // 9
+  { f: '#f5c4ec', b: '#d372c3', t: '#b64fa6' }, // 10
+  { f: '#ffc5d1', b: '#e76886', t: '#c94566' }, // 11
+  { f: '#e8d4b6', b: '#b08b54', t: '#8d6935' }  // 12
+];
+const pal = v => v < PALETTE.length ? PALETTE[v]
+  : { f: `hsl(${v * 47 % 360} 80% 86%)`, b: `hsl(${v * 47 % 360} 55% 56%)`, t: `hsl(${v * 47 % 360} 55% 42%)` };
+
+// ---------- Kalıcı veri ----------
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+};
+let best = +store.get('sm_best', 0) || 0;
+let muted = store.get('sm_mute', '0') === '1';
+const seen = store.get('sm_seen', '0') === '1';
+
+// ---------- Canvas ----------
+const cvs = document.getElementById('c');
+const ctx = cvs.getContext('2d');
+let scale = 1;
+function resize() {
+  const r = document.body.getBoundingClientRect();
+  let w = r.width, h = r.height;
+  if (w / h > 9 / 16) w = h * 9 / 16; else h = w * 16 / 9;
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+  cvs.style.width = w + 'px'; cvs.style.height = h + 'px';
+  cvs.width = Math.round(w * dpr); cvs.height = Math.round(h * dpr);
+  scale = cvs.width / LW;
+}
+window.addEventListener('resize', resize);
+resize();
+
+function rr(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+// ---------- Ses ----------
+let AC = null;
+function initAudio() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (AC && AC.state === 'suspended') AC.resume();
+}
+function tone(f, dur, type = 'sine', vol = 0.12, delay = 0) {
+  if (!AC || muted) return;
+  const t = AC.currentTime + delay, o = AC.createOscillator(), g = AC.createGain();
+  o.type = type; o.frequency.setValueAtTime(f, t);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(vol, t + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g).connect(AC.destination); o.start(t); o.stop(t + dur + 0.03);
+}
+function sfx(k, n = 1) {
+  switch (k) {
+    case 'place': tone(330, 0.07, 'triangle', 0.1); break;
+    case 'tick': tone(700, 0.04, 'sine', 0.06); break;
+    case 'deal': [0, 1, 2].forEach(i => tone(560 + i * 60, 0.05, 'sine', 0.05, i * 0.06)); break;
+    case 'merge': {
+      const f = 392 * Math.pow(2, (n - 1) * 3 / 12);
+      tone(f, 0.18, 'triangle', 0.15); tone(f * 2, 0.12, 'sine', 0.05, 0.02); break;
+    }
+    case 'stage': [0, 4, 7, 12].forEach((s, i) => tone(523 * Math.pow(2, s / 12), 0.22, 'triangle', 0.13, i * 0.08)); break;
+    case 'bad': tone(140, 0.12, 'square', 0.04); break;
+    case 'fail': [0, -3, -7].forEach((s, i) => tone(330 * Math.pow(2, s / 12), 0.32, 'sine', 0.12, i * 0.16)); break;
+  }
+}
+const vib = p => { try { navigator.vibrate && navigator.vibrate(p); } catch (e) {} };
+
+// ---------- Durum ----------
+let S, uid = 0, drag = null, parts = [], texts = [], fx = [];
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function mkCard(v, x, y) {
+  return { id: uid++, v, x, y, w: HW, pop: 0, shake: 0, lift: 0, alpha: 1, ov: null, drag: false, sel: false };
+}
+function newGame() {
+  S = {
+    slots: [], hand: [], target: CFG.startTarget, maxRand: CFG.startTarget - CFG.randGap,
+    stage: 1, slotCount: CFG.startSlots, busy: false, over: false, overT: 0,
+    sel: null, banner: null, tpop: 0, help: false
+  };
+  for (let i = 0; i < S.slotCount; i++) S.slots.push([]);
+  drag = null; parts = []; texts = []; fx = [];
+  deal();
+}
+function randVal() {
+  const m = S.maxRand, w = [];
+  let tot = 0;
+  for (let v = 1; v <= m; v++) { const x = CFG.lowBias ? (m - v + 3) : 1; w.push(x); tot += x; }
+  let r = Math.random() * tot;
+  for (let v = 1; v <= m; v++) { r -= w[v - 1]; if (r <= 0) return v; }
+  return m;
+}
+function deal() {
+  for (let i = 0; i < CFG.handSize; i++) {
+    const p = handPos(i);
+    S.hand[i] = mkCard(randVal(), p.x, LH + 40 + i * 70);
+  }
+  sfx('deal');
+}
+
+// ---------- Yerleşim ----------
+function layout() {
+  const n = S.slotCount, gap = n <= 4 ? 16 : n <= 6 ? 12 : 8, avail = BOARD.w - 32;
+  const cw = Math.min(100, (avail - gap * (n - 1)) / n), ch = cw * RATIO;
+  const total = cw * n + gap * (n - 1), x0 = BOARD.x + (BOARD.w - total) / 2;
+  const xs = [];
+  for (let i = 0; i < n; i++) xs.push(x0 + i * (cw + gap));
+  return { n, gap, cw, ch, xs, y: BOARD.y + 130 };
+}
+function stackOff(L, len) {
+  const base = L.cw * 0.34;
+  if (len <= 1) return base;
+  const room = BOARD.y + BOARD.h - 22 - L.y - L.ch;
+  return Math.max(8, Math.min(base, room / (len - 1)));
+}
+function handPos(i) { return { x: LW / 2 - HW / 2 + (i - 1) * 128, y: TRAY.y + (TRAY.h - HW * RATIO) / 2 }; }
+function slotAt(x, y, yMin) {
+  const L = layout();
+  if (y < yMin || y > BOARD.y + BOARD.h + 30) return -1;
+  for (let si = 0; si < L.n; si++) {
+    if (x >= L.xs[si] - L.gap / 2 && x <= L.xs[si] + L.cw + L.gap / 2) return si;
+  }
+  return -1;
+}
+
+// ---------- Kurallar ----------
+function canPlace(v, si) {
+  const st = S.slots[si];
+  if (!st.length) return true;                 // boş slot
+  const top = st[st.length - 1].v;
+  return top === v || top === v + 1;          // aynı sayı (merge) ya da 1 büyük (solitaire)
+}
+function runStart(si) {                        // öndeki ardışık seri
+  const st = S.slots[si];
+  let k = st.length - 1;
+  while (k > 0 && st[k - 1].v === st[k].v + 1) k--;
+  return k;
+}
+function legal(from, si) {
+  if (from.type === 'hand') { const c = S.hand[from.i]; return !!c && canPlace(c.v, si); }
+  if (from.si === si) return false;
+  const c = S.slots[from.si][from.k];
+  return !!c && canPlace(c.v, si);
+}
+function anyPlaceable() { return S.hand.some(c => c && S.slots.some((_, si) => canPlace(c.v, si))); }
+function cardsOf(from) { return from.type === 'hand' ? [S.hand[from.i]] : S.slots[from.si].slice(from.k); }
+function sameFrom(a, b) {
+  return !!a && !!b && a.type === b.type && (a.type === 'hand' ? a.i === b.i : (a.si === b.si && a.k === b.k));
+}
+function allCards() { const a = []; S.slots.forEach(st => a.push(...st)); S.hand.forEach(c => c && a.push(c)); return a; }
+function setSel(from) { clearSel(); S.sel = from; cardsOf(from).forEach(c => c.sel = true); sfx('tick'); }
+function clearSel() { S.sel = null; allCards().forEach(c => c.sel = false); }
+
+function doMove(from, si) { from.type === 'hand' ? placeFromHand(from.i, si) : moveRun(from.si, from.k, si); }
+
+async function placeFromHand(hi, si) {
+  S.busy = true; clearSel();
+  const c = S.hand[hi]; S.hand[hi] = null; c.lift = 0.3;
+  const st = S.slots[si]; st.push(c); sfx('place');
+  await sleep(85);
+  await resolve(si, st.length - 1);
+  afterMove();
+}
+async function moveRun(si, k, di) {
+  S.busy = true; clearSel();
+  const run = S.slots[si].splice(k); run.forEach(c => c.lift = 0.3);
+  const dst = S.slots[di], j = dst.length;
+  dst.push(...run); sfx('place');
+  await sleep(85);
+  await resolve(di, j);
+  afterMove();
+}
+
+// Birleşme zinciri: yerleştirilen grubun alt kartı ile arkasındaki kart aynıysa birleşir, zincir geriye doğru devam eder.
+async function resolve(si, i) {
+  const st = S.slots[si];
+  let chain = 0;
+  while (i > 0 && i < st.length && st[i].v === st[i - 1].v) {
+    const a = st[i], b = st[i - 1];
+    a.ov = b;
+    await sleep(chain ? 60 : 75);
+    st.splice(i, 1);
+    b.v++; b.pop = 1; chain++; i--;
+    burst(b.x + b.w / 2, b.y + b.w * RATIO / 2, [pal(b.v).b, pal(b.v).f], 12 + chain * 4);
+    sfx('merge', chain); vib(12);
+    if (chain >= 2) addText(b.x + b.w / 2, b.y - 4, 'x' + chain, pal(b.v).t, 26 + chain * 3);
+    await sleep(105);
+    if (b.v >= S.target) await collect(si, i);
+  }
+}
+async function collect(si, i) {
+  const st = S.slots[si], c = st[i];
+  st.splice(i, 1);
+  fx.push(c);
+  const cx = c.x + c.w / 2, cy = c.y + c.w * RATIO / 2;
+  burst(cx, cy, ['#ffd166', '#62dbe6', pal(c.v).b, '#ffffff'], 40);
+  stageUp();
+  await sleep(170);
+}
+function stageUp() {
+  S.stage++; S.target++; S.maxRand++; S.tpop = 1;
+  let sub = 'Cards now 1–' + S.maxRand;
+  if ((S.stage - 1) % CFG.slotEvery === 0 && S.slotCount < CFG.maxSlots) {
+    S.slotCount++; S.slots.push([]); sub = '+1 slot unlocked';
+  }
+  S.banner = { text: 'Stage ' + S.stage, sub, t: 0 };
+  sfx('stage'); vib([20, 40, 20]);
+  if (S.stage > best) { best = S.stage; store.set('sm_best', best); }
+}
+function afterMove() {
+  if (S.hand.every(c => !c)) deal();
+  if (!anyPlaceable()) {
+    setTimeout(() => { S.over = true; S.overT = 0; S.busy = false; sfx('fail'); vib(80); }, 380);
+  } else {
+    S.busy = false;
+  }
+}
+
+// ---------- Efektler ----------
+function burst(x, y, colors, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, sp = 120 + Math.random() * 260;
+    parts.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 120, life: 0.6 + Math.random() * 0.4, max: 1,
+      r: 3 + Math.random() * 5, c: colors[i % colors.length] });
+  }
+}
+function addText(x, y, text, color, size) { texts.push({ x, y, text, color, size, life: 1 }); }
+
+// ---------- Girdi ----------
+function pt(e) {
+  const r = cvs.getBoundingClientRect();
+  return { x: (e.clientX - r.left) / r.width * LW, y: (e.clientY - r.top) / r.height * LH };
+}
+const inRect = (p, b) => p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h;
+const hitC = (c, p) => p.x >= c.x && p.x <= c.x + c.w && p.y >= c.y && p.y <= c.y + c.w * RATIO;
+
+function hitButtons(p) {
+  for (const b of BTNS) {
+    if (Math.hypot(p.x - b.x, p.y - b.y) < 24) {
+      if (b.id === 'help') { if (!S.over) { S.help = !S.help; clearSel(); } }
+      else if (b.id === 'sound') { muted = !muted; store.set('sm_mute', muted ? '1' : '0'); }
+      else if (b.id === 'restart') { if (!S.busy || S.over) newGame(); }
+      return true;
+    }
+  }
+  return false;
+}
+function pickCard(p) {
+  for (let i = 0; i < S.hand.length; i++) {
+    const c = S.hand[i];
+    if (c && hitC(c, p)) return { from: { type: 'hand', i }, cards: [c] };
+  }
+  for (let si = 0; si < S.slots.length; si++) {
+    const st = S.slots[si];
+    for (let j = st.length - 1; j >= 0; j--) {
+      if (hitC(st[j], p)) {
+        const k = runStart(si);
+        if (j >= k) return { from: { type: 'slot', si, k }, cards: st.slice(k) };
+        st[j].shake = 1; sfx('bad');
+        return 'blocked';
+      }
+    }
+  }
+  return null;
+}
+
+cvs.addEventListener('pointerdown', e => {
+  e.preventDefault(); initAudio();
+  const p = pt(e);
+  if (hitButtons(p)) return;
+  if (S.help) { if (inRect(p, HELP_BTN)) { S.help = false; store.set('sm_seen', '1'); } return; }
+  if (S.over) { if (inRect(p, OVER_BTN)) newGame(); return; }
+  if (S.busy) return;
+  if (S.sel) {
+    const si = slotAt(p.x, p.y, layout().y - 30);
+    if (si >= 0 && legal(S.sel, si)) { doMove(S.sel, si); return; }
+  }
+  const pk = pickCard(p);
+  if (!pk || pk === 'blocked') { clearSel(); return; }
+  const c0 = pk.cards[0];
+  drag = { from: pk.from, cards: pk.cards, sx: p.x, sy: p.y, px: p.x, py: p.y,
+    fx: (p.x - c0.x) / c0.w, fy: (p.y - c0.y) / c0.w, moved: false, wasSel: sameFrom(S.sel, pk.from) };
+  pk.cards.forEach(c => c.drag = true);
+  try { cvs.setPointerCapture(e.pointerId); } catch (_) {}
+});
+cvs.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const p = pt(e);
+  drag.px = p.x; drag.py = p.y;
+  if (!drag.moved && Math.hypot(p.x - drag.sx, p.y - drag.sy) > 9) {
+    drag.moved = true;
+    if (S.sel) clearSel();
+  }
+});
+function endDrag(cancel) {
+  if (!drag) return;
+  const d = drag; drag = null;
+  d.cards.forEach(c => c.drag = false);
+  if (cancel) return;
+  if (d.moved) {
+    const c0 = d.cards[0];
+    const si = slotAt(c0.x + c0.w / 2, c0.y + c0.w * 0.5, BOARD.y + 60);
+    if (si >= 0 && legal(d.from, si)) doMove(d.from, si);
+    else if (si >= 0 && !(d.from.type === 'slot' && d.from.si === si)) { d.cards.forEach(c => c.shake = 1); sfx('bad'); }
+  } else {
+    if (d.wasSel) clearSel(); else setSel(d.from);
+  }
+}
+cvs.addEventListener('pointerup', () => endDrag(false));
+cvs.addEventListener('pointercancel', () => endDrag(true));
+
+// ---------- Güncelleme ----------
+function approach(c, tx, ty, tw, k) { c.x += (tx - c.x) * k; c.y += (ty - c.y) * k; c.w += (tw - c.w) * k; }
+function update(dt) {
+  const L = layout();
+  const k = 1 - Math.exp(-dt * 24), kf = 1 - Math.exp(-dt * 38), kd = 1 - Math.exp(-dt * 50);
+  S.slots.forEach((st, si) => {
+    const off = stackOff(L, st.length);
+    st.forEach((c, i) => {
+      if (c.drag) return;
+      let tx = L.xs[si], ty = L.y + i * off;
+      if (c.sel) ty -= 14;
+      if (c.ov) { tx = c.ov.x; ty = c.ov.y; }
+      approach(c, tx, ty, L.cw, c.ov ? kf : k);
+    });
+  });
+  S.hand.forEach((c, i) => {
+    if (!c || c.drag) return;
+    const p = handPos(i);
+    approach(c, p.x, p.y - (c.sel ? 14 : 0), HW, k);
+  });
+  if (drag && drag.moved) {
+    const off = L.cw * 0.34;
+    drag.cards.forEach((c, i) => approach(c, drag.px - drag.fx * L.cw, drag.py - drag.fy * L.cw + i * off, L.cw, kd));
+  }
+  for (let i = fx.length - 1; i >= 0; i--) {
+    const c = fx[i];
+    approach(c, BADGE.x - c.w / 2, BADGE.y - c.w * RATIO / 2, 34, kf);
+    c.alpha -= dt * 2.4;
+    if (c.alpha <= 0) fx.splice(i, 1);
+  }
+  [...allCards(), ...fx].forEach(c => {
+    c.pop = Math.max(0, c.pop - dt * 5);
+    c.shake = Math.max(0, c.shake - dt * 4);
+    c.lift = Math.max(0, c.lift - dt);
+  });
+  S.tpop = Math.max(0, S.tpop - dt * 3.5);
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i];
+    p.vy += 650 * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt;
+    if (p.life <= 0) parts.splice(i, 1);
+  }
+  for (let i = texts.length - 1; i >= 0; i--) {
+    const t = texts[i];
+    t.y -= 45 * dt; t.life -= dt * 1.1;
+    if (t.life <= 0) texts.splice(i, 1);
+  }
+  if (S.banner) { S.banner.t += dt; if (S.banner.t > 1.5) S.banner = null; }
+  if (S.over) S.overT = Math.min(1, S.overT + dt * 4);
+}
+
+// ---------- Çizim ----------
+function drawCard(c) {
+  const w = c.w, h = w * RATIO, p = pal(c.v);
+  const s = 1 + 0.24 * Math.sin(Math.PI * c.pop);
+  const sh = c.shake > 0 ? Math.sin(c.shake * 40) * 6 * c.shake : 0;
+  const r = w * 0.16;
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, c.alpha == null ? 1 : c.alpha);
+  ctx.translate(c.x + w / 2 + sh, c.y + h / 2);
+  ctx.scale(s, s);
+  if (c.rot) ctx.rotate(c.rot);
+  ctx.fillStyle = c.drag ? 'rgba(110,70,40,0.24)' : 'rgba(110,70,40,0.13)';
+  rr(-w / 2, -h / 2 + (c.drag ? 9 : 3), w, h, r); ctx.fill();
+  rr(-w / 2, -h / 2, w, h, r); ctx.fillStyle = p.f; ctx.fill();
+  ctx.lineWidth = Math.max(2, w * 0.045); ctx.strokeStyle = p.b; ctx.stroke();
+  rr(-w / 2 + w * 0.08, -h / 2 + w * 0.08, w * 0.84, h - w * 0.16, r * 0.7);
+  ctx.strokeStyle = 'rgba(255,255,255,0.45)'; ctx.lineWidth = w * 0.025; ctx.stroke();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = p.b; ctx.font = `700 ${w * 0.17}px ${FONT}`;
+  ctx.fillText(c.v, -w / 2 + w * 0.16, -h / 2 + w * 0.17);
+  ctx.save(); ctx.rotate(Math.PI); ctx.fillText(c.v, -w / 2 + w * 0.16, -h / 2 + w * 0.17); ctx.restore();
+  ctx.font = `700 ${w * (c.v >= 10 ? 0.42 : 0.54)}px ${FONT}`;
+  ctx.lineJoin = 'round'; ctx.lineWidth = w * 0.07; ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+  ctx.strokeText(c.v, 0, h * 0.03);
+  ctx.fillStyle = p.t; ctx.fillText(c.v, 0, h * 0.03);
+  ctx.restore();
+}
+function glow(x, y, w, h, strong) {
+  ctx.save();
+  ctx.shadowColor = 'rgba(80,220,232,0.9)'; ctx.shadowBlur = strong ? 24 : 12;
+  ctx.strokeStyle = strong ? '#3fd3e0' : '#7fe3ec'; ctx.lineWidth = strong ? 5 : 3.5;
+  rr(x - 5, y - 5, w + 10, h + 10, w * 0.2); ctx.stroke();
+  ctx.restore();
+}
+function text(str, x, y, size, color, weight = 700, align = 'center') {
+  ctx.font = `${weight} ${size}px ${FONT}`; ctx.fillStyle = color;
+  ctx.textAlign = align; ctx.textBaseline = 'middle'; ctx.fillText(str, x, y);
+}
+function wrap(str, x, y, maxW, lh) {
+  const words = str.split(' ');
+  let line = '';
+  for (const w of words) {
+    const t = line ? line + ' ' + w : w;
+    if (ctx.measureText(t).width > maxW && line) { ctx.fillText(line, x, y); y += lh; line = w; }
+    else line = t;
+  }
+  ctx.fillText(line, x, y);
+  return y + lh;
+}
+function drawHeader() {
+  rr(34, 34, 96, 34, 17); ctx.fillStyle = '#efdcc4'; ctx.fill();
+  text('Target', 72, 52, 17, '#a07d5b', 600);
+  drawCard({ x: 112, y: 22, w: 44, v: S.target, pop: S.tpop, shake: 0, rot: 0.2, alpha: 1 });
+  text('Stage ' + S.stage, 270, 48, 26, '#8a6a4c', 700);
+  text(`Cards 1–${S.maxRand}   Best ${best}`, 270, 78, 14, '#b39373', 500);
+  for (const b of BTNS) {
+    ctx.beginPath(); ctx.arc(b.x, b.y, 19, 0, Math.PI * 2); ctx.fillStyle = '#f1e1cd'; ctx.fill();
+    const g = b.id === 'help' ? '?' : b.id === 'sound' ? '♪' : '↻';
+    text(g, b.x, b.y + 1, b.id === 'restart' ? 22 : 19, '#9a7a5a', 700);
+    if (b.id === 'sound' && muted) {
+      ctx.strokeStyle = '#c0634f'; ctx.lineWidth = 2.5; ctx.beginPath();
+      ctx.moveTo(b.x - 10, b.y + 10); ctx.lineTo(b.x + 10, b.y - 10); ctx.stroke();
+    }
+  }
+}
+function easeOutBack(x) { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); }
+
+function draw() {
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  ctx.fillStyle = '#ead6bd'; ctx.fillRect(0, 0, LW, LH);
+  rr(BOARD.x, BOARD.y, BOARD.w, BOARD.h, 30); ctx.fillStyle = '#fbf4ec'; ctx.fill();
+  rr(TRAY.x, TRAY.y, TRAY.w, TRAY.h, 30); ctx.fillStyle = '#f1dfc8'; ctx.fill();
+  for (let i = 0; i < CFG.handSize; i++) {
+    const p = handPos(i); rr(p.x, p.y, HW, HW * RATIO, 16); ctx.fillStyle = '#e9d3b8'; ctx.fill();
+  }
+  drawHeader();
+
+  const L = layout();
+  for (let si = 0; si < L.n; si++) { rr(L.xs[si], L.y, L.cw, L.ch, L.cw * 0.16); ctx.fillStyle = '#f2e4d4'; ctx.fill(); }
+
+  const active = (drag && drag.moved) ? drag.from : S.sel;
+  if (active && !S.busy && !S.over) {
+    let hov = -1;
+    if (drag && drag.moved) { const c0 = drag.cards[0]; hov = slotAt(c0.x + c0.w / 2, c0.y + c0.w * 0.5, BOARD.y + 60); }
+    for (let si = 0; si < L.n; si++) {
+      if (!legal(active, si)) continue;
+      const st = S.slots[si], off = stackOff(L, st.length);
+      glow(L.xs[si], st.length ? L.y + (st.length - 1) * off : L.y, L.cw, L.ch, si === hov);
+    }
+  }
+
+  const late = [];
+  S.slots.forEach(st => {
+    if (st.some(c => c.lift > 0)) late.push(st);
+    else st.forEach(c => { if (!c.drag) drawCard(c); });
+  });
+  late.forEach(st => st.forEach(c => { if (!c.drag) drawCard(c); }));
+  S.hand.forEach(c => { if (c && !c.drag) drawCard(c); });
+  fx.forEach(drawCard);
+  if (drag) drag.cards.forEach(drawCard);
+
+  parts.forEach(p => {
+    ctx.globalAlpha = Math.max(0, p.life / p.max);
+    ctx.fillStyle = p.c; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+  texts.forEach(t => {
+    ctx.globalAlpha = Math.max(0, Math.min(1, t.life * 1.5));
+    ctx.font = `700 ${t.size}px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.lineWidth = 6; ctx.lineJoin = 'round'; ctx.strokeStyle = '#fff'; ctx.strokeText(t.text, t.x, t.y);
+    ctx.fillStyle = t.color; ctx.fillText(t.text, t.x, t.y);
+  });
+  ctx.globalAlpha = 1;
+
+  if (S.banner) {
+    const t = S.banner.t;
+    const a = t < 0.12 ? t / 0.12 : t > 1.2 ? Math.max(0, (1.5 - t) / 0.3) : 1;
+    const sc = t < 0.22 ? 0.6 + 0.4 * easeOutBack(t / 0.22) : 1;
+    const p = pal(S.target - 1);
+    ctx.save(); ctx.globalAlpha = a; ctx.translate(LW / 2, BOARD.y + BOARD.h - 90); ctx.scale(sc, sc);
+    rr(-150, -46, 300, 92, 28); ctx.fillStyle = 'rgba(255,255,255,0.94)'; ctx.fill();
+    ctx.lineWidth = 4; ctx.strokeStyle = p.b; ctx.stroke();
+    text(S.banner.text, 0, -12, 34, '#7a5a3c', 700);
+    text(S.banner.sub, 0, 22, 18, p.t, 600);
+    ctx.restore();
+  }
+
+  if (S.help) drawHelp();
+  if (S.over) drawOver();
+}
+function drawHelp() {
+  ctx.fillStyle = 'rgba(70,48,32,0.45)'; ctx.fillRect(0, 0, LW, LH);
+  rr(40, 140, 460, 620, 30); ctx.fillStyle = '#fbf4ec'; ctx.fill();
+  text('How to play', LW / 2, 196, 30, '#7a5a3c', 700);
+  const lines = [
+    [1, 'Drag cards from the bottom into the slots. You can also tap a card, then tap a slot.'],
+    [2, 'A card goes into an empty slot, in front of a card 1 higher, or in front of the same number.'],
+    [3, 'Matching numbers merge into the next number, and merges chain automatically.'],
+    [5, 'Reach the target to clear a stage: the target and new cards go up by 1, and every 3 stages add a slot.'],
+    [6, 'Move the front run of consecutive cards (e.g. 1-2-3) to another slot as a group.'],
+    [7, 'If none of the bottom cards fit anywhere, the game ends.']
+  ];
+  let y = 252;
+  ctx.font = `500 18px ${FONT}`; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  for (const [v, s] of lines) {
+    const p = pal(v);
+    rr(66, y - 13, 20, 26, 6); ctx.fillStyle = p.f; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = p.b; ctx.stroke();
+    ctx.font = `500 18px ${FONT}`; ctx.fillStyle = '#7a5f48'; ctx.textAlign = 'left';
+    y = wrap(s, 100, y, 370, 25) + 12;
+  }
+  const b = HELP_BTN;
+  rr(b.x, b.y, b.w, b.h, 30); ctx.fillStyle = '#5cbf7c'; ctx.fill();
+  text(seen || store.get('sm_seen', '0') === '1' ? 'Continue' : 'Start', b.x + b.w / 2, b.y + b.h / 2 + 1, 24, '#fff', 700);
+}
+function drawOver() {
+  const a = S.overT;
+  ctx.globalAlpha = a;
+  ctx.fillStyle = 'rgba(70,48,32,0.5)'; ctx.fillRect(0, 0, LW, LH);
+  ctx.save(); ctx.translate(LW / 2, 460); const sc = 0.85 + 0.15 * easeOutBack(a); ctx.scale(sc, sc); ctx.translate(-LW / 2, -460);
+  rr(70, 300, 400, 330, 30); ctx.fillStyle = '#fbf4ec'; ctx.fill();
+  text('No moves left', LW / 2, 362, 32, '#7a5a3c', 700);
+  text('None of your cards fit in any slot.', LW / 2, 404, 16, '#a3866a', 500);
+  text('Stage reached: ' + S.stage, LW / 2, 448, 22, '#8a6a4c', 600);
+  text('Best: ' + best, LW / 2, 482, 18, '#b39373', 500);
+  const b = OVER_BTN;
+  rr(b.x, b.y, b.w, b.h, 32); ctx.fillStyle = '#5cbf7c'; ctx.fill();
+  text('Play again', b.x + b.w / 2, b.y + b.h / 2 + 1, 24, '#fff', 700);
+  ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+// ---------- Başlat ----------
+newGame();
+S.help = !seen;
+let last = performance.now();
+function frame(t) {
+  const dt = Math.min(0.05, (t - last) / 1000); last = t;
+  update(dt); draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
