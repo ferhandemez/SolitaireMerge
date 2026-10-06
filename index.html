@@ -267,9 +267,8 @@ async function resolve(si, i) {
   }
 }
 async function collect(si, i) {
-  const st = S.slots[si], c = st[i];
-  st.splice(i, 1);
-  fx.push(c);
+  const c = S.slots[si][i];   // kart board'da kalır
+  c.pop = 1;
   const cx = c.x + c.w / 2, cy = c.y + c.w * RATIO / 2;
   burst(cx, cy, ['#ffd166', '#62dbe6', pal(c.v).b, '#ffffff'], 40);
   stageUp();
