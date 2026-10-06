@@ -33,7 +33,8 @@ const CFG = {
   handSize: 3,      // altta verilen kart sayısı
   randGap: 2,       // gelen kartlar hedeften en az 2 küçük
   slotEvery: 3,     // her 3 aşamada +1 slot
-  maxSlots: 8,      // ekran genişliği sınırı
+  maxSlots: 8,      // en fazla slot
+  slotsPerRow: 4,   // bir satırda en fazla 4 slot
   lowBias: true     // küçük kartlar biraz daha sık gelsin
 };
 
@@ -42,6 +43,7 @@ const FONT = '"Fredoka", "Trebuchet MS", "Segoe UI", system-ui, sans-serif';
 const BOARD = { x: 16, y: 16, w: 508, h: 744 };
 const TRAY  = { x: 16, y: 772, w: 508, h: 172 };
 const BADGE = { x: 134, y: 50 };
+const PLUS = { x: 0, y: 48, r: 15 };
 const BTNS = [{ x: 392, y: 54, id: 'help' }, { x: 440, y: 54, id: 'sound' }, { x: 488, y: 54, id: 'restart' }];
 const HELP_BTN = { x: 170, y: 676, w: 200, h: 60 };
 const OVER_BTN = { x: 160, y: 530, w: 220, h: 64 };
@@ -165,25 +167,36 @@ function deal() {
 
 // ---------- Yerleşim ----------
 function layout() {
-  const n = S.slotCount, gap = n <= 4 ? 16 : n <= 6 ? 12 : 8, avail = BOARD.w - 32;
-  const cw = Math.min(100, (avail - gap * (n - 1)) / n), ch = cw * RATIO;
-  const total = cw * n + gap * (n - 1), x0 = BOARD.x + (BOARD.w - total) / 2;
-  const xs = [];
-  for (let i = 0; i < n; i++) xs.push(x0 + i * (cw + gap));
-  return { n, gap, cw, ch, xs, y: BOARD.y + 130 };
+  const n = S.slotCount, per = CFG.slotsPerRow, rows = Math.ceil(n / per);
+  const cols = Math.min(n, per), gap = 16, avail = BOARD.w - 32;
+  const top = BOARD.y + 130, bottom = BOARD.y + BOARD.h - 22;
+  const rowH = (bottom - top) / rows;
+  let cw = Math.min(100, (avail - gap * (cols - 1)) / cols);
+  if (rows > 1) cw = Math.min(cw, 86);
+  const ch = cw * RATIO, xs = [], ys = [], lim = [], row = [];
+  for (let i = 0; i < n; i++) {
+    const r = Math.floor(i / per), inRow = Math.min(per, n - r * per);
+    const total = cw * inRow + gap * (inRow - 1), x0 = BOARD.x + (BOARD.w - total) / 2;
+    xs.push(x0 + (i % per) * (cw + gap));
+    ys.push(top + r * rowH);
+    lim.push(r < rows - 1 ? top + (r + 1) * rowH - 18 : bottom);
+    row.push(r);
+  }
+  return { n, rows, gap, cw, ch, xs, ys, lim, row };
 }
-function stackOff(L, len) {
+function stackOff(L, si, len) {
   const base = L.cw * 0.34;
   if (len <= 1) return base;
-  const room = BOARD.y + BOARD.h - 22 - L.y - L.ch;
+  const room = L.lim[si] - L.ys[si] - L.ch;
   return Math.max(8, Math.min(base, room / (len - 1)));
 }
 function handPos(i) { return { x: LW / 2 - HW / 2 + (i - 1) * 128, y: TRAY.y + (TRAY.h - HW * RATIO) / 2 }; }
-function slotAt(x, y, yMin) {
+function slotAt(x, y) {
   const L = layout();
-  if (y < yMin || y > BOARD.y + BOARD.h + 30) return -1;
   for (let si = 0; si < L.n; si++) {
-    if (x >= L.xs[si] - L.gap / 2 && x <= L.xs[si] + L.cw + L.gap / 2) return si;
+    const last = L.row[si] === L.rows - 1;
+    if (x >= L.xs[si] - L.gap / 2 && x <= L.xs[si] + L.cw + L.gap / 2 &&
+        y >= L.ys[si] - 40 && y <= L.lim[si] + (last ? 40 : 18)) return si;
   }
   return -1;
 }
@@ -262,7 +275,7 @@ async function collect(si, i) {
   stageUp();
   await sleep(170);
 }
-function stageUp() {
+function stageUp(cheat = false) {
   S.stage++; S.target++; S.maxRand++; S.tpop = 1;
   let sub = 'Cards now 1–' + S.maxRand;
   if ((S.stage - 1) % CFG.slotEvery === 0 && S.slotCount < CFG.maxSlots) {
@@ -270,7 +283,7 @@ function stageUp() {
   }
   S.banner = { text: 'Stage ' + S.stage, sub, t: 0 };
   sfx('stage'); vib([20, 40, 20]);
-  if (S.stage > best) { best = S.stage; store.set('sm_best', best); }
+  if (!cheat && S.stage > best) { best = S.stage; store.set('sm_best', best); }
 }
 function afterMove() {
   if (S.hand.every(c => !c)) deal();
@@ -300,6 +313,10 @@ const inRect = (p, b) => p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= 
 const hitC = (c, p) => p.x >= c.x && p.x <= c.x + c.w && p.y >= c.y && p.y <= c.y + c.w * RATIO;
 
 function hitButtons(p) {
+  if (Math.hypot(p.x - PLUS.x, p.y - PLUS.y) < PLUS.r + 8) {
+    if (!S.busy && !S.over && !S.help) { clearSel(); stageUp(true); }
+    return true;
+  }
   for (const b of BTNS) {
     if (Math.hypot(p.x - b.x, p.y - b.y) < 24) {
       if (b.id === 'help') { if (!S.over) { S.help = !S.help; clearSel(); } }
@@ -337,7 +354,7 @@ cvs.addEventListener('pointerdown', e => {
   if (S.over) { if (inRect(p, OVER_BTN)) newGame(); return; }
   if (S.busy) return;
   if (S.sel) {
-    const si = slotAt(p.x, p.y, layout().y - 30);
+    const si = slotAt(p.x, p.y);
     if (si >= 0 && legal(S.sel, si)) { doMove(S.sel, si); return; }
   }
   const pk = pickCard(p);
@@ -364,7 +381,7 @@ function endDrag(cancel) {
   if (cancel) return;
   if (d.moved) {
     const c0 = d.cards[0];
-    const si = slotAt(c0.x + c0.w / 2, c0.y + c0.w * 0.5, BOARD.y + 60);
+    const si = slotAt(c0.x + c0.w / 2, c0.y + c0.w * 0.5);
     if (si >= 0 && legal(d.from, si)) doMove(d.from, si);
     else if (si >= 0 && !(d.from.type === 'slot' && d.from.si === si)) { d.cards.forEach(c => c.shake = 1); sfx('bad'); }
   } else {
@@ -380,10 +397,10 @@ function update(dt) {
   const L = layout();
   const k = 1 - Math.exp(-dt * 24), kf = 1 - Math.exp(-dt * 38), kd = 1 - Math.exp(-dt * 50);
   S.slots.forEach((st, si) => {
-    const off = stackOff(L, st.length);
+    const off = stackOff(L, si, st.length);
     st.forEach((c, i) => {
       if (c.drag) return;
-      let tx = L.xs[si], ty = L.y + i * off;
+      let tx = L.xs[si], ty = L.ys[si] + i * off;
       if (c.sel) ty -= 14;
       if (c.ov) { tx = c.ov.x; ty = c.ov.y; }
       approach(c, tx, ty, L.cw, c.ov ? kf : k);
@@ -478,6 +495,10 @@ function drawHeader() {
   text('Target', 72, 52, 17, '#a07d5b', 600);
   drawCard({ x: 112, y: 22, w: 44, v: S.target, pop: S.tpop, shake: 0, rot: 0.2, alpha: 1 });
   text('Stage ' + S.stage, 270, 48, 26, '#8a6a4c', 700);
+  PLUS.x = 270 + ctx.measureText('Stage ' + S.stage).width / 2 + 24;
+  ctx.beginPath(); ctx.arc(PLUS.x, PLUS.y, PLUS.r, 0, Math.PI * 2); ctx.fillStyle = '#5cbf7c'; ctx.fill();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 3.5; ctx.lineCap = 'round'; ctx.beginPath();
+  ctx.moveTo(PLUS.x - 6, PLUS.y); ctx.lineTo(PLUS.x + 6, PLUS.y); ctx.moveTo(PLUS.x, PLUS.y - 6); ctx.lineTo(PLUS.x, PLUS.y + 6); ctx.stroke();
   text(`Cards 1–${S.maxRand}   Best ${best}`, 270, 78, 14, '#b39373', 500);
   for (const b of BTNS) {
     ctx.beginPath(); ctx.arc(b.x, b.y, 19, 0, Math.PI * 2); ctx.fillStyle = '#f1e1cd'; ctx.fill();
@@ -502,16 +523,16 @@ function draw() {
   drawHeader();
 
   const L = layout();
-  for (let si = 0; si < L.n; si++) { rr(L.xs[si], L.y, L.cw, L.ch, L.cw * 0.16); ctx.fillStyle = '#f2e4d4'; ctx.fill(); }
+  for (let si = 0; si < L.n; si++) { rr(L.xs[si], L.ys[si], L.cw, L.ch, L.cw * 0.16); ctx.fillStyle = '#f2e4d4'; ctx.fill(); }
 
   const active = (drag && drag.moved) ? drag.from : S.sel;
   if (active && !S.busy && !S.over) {
     let hov = -1;
-    if (drag && drag.moved) { const c0 = drag.cards[0]; hov = slotAt(c0.x + c0.w / 2, c0.y + c0.w * 0.5, BOARD.y + 60); }
+    if (drag && drag.moved) { const c0 = drag.cards[0]; hov = slotAt(c0.x + c0.w / 2, c0.y + c0.w * 0.5); }
     for (let si = 0; si < L.n; si++) {
       if (!legal(active, si)) continue;
-      const st = S.slots[si], off = stackOff(L, st.length);
-      glow(L.xs[si], st.length ? L.y + (st.length - 1) * off : L.y, L.cw, L.ch, si === hov);
+      const st = S.slots[si], off = stackOff(L, si, st.length);
+      glow(L.xs[si], L.ys[si] + Math.max(0, st.length - 1) * off, L.cw, L.ch, si === hov);
     }
   }
 
