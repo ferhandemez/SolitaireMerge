@@ -26,27 +26,93 @@
 (() => {
 'use strict';
 
-// ---------- Ayarlar (GDD) ----------
+// ---------- Ayarlar ----------
 const CFG = {
-  startTarget: 6,   // başlangıç hedef kart
-  startSlots: 4,    // başlangıç slot sayısı
   handSize: 3,      // altta verilen kart sayısı
-  randGap: 2,       // gelen kartlar hedeften en az 2 küçük
-  slotEvery: 3,     // her 3 aşamada +1 slot
-  maxSlots: 8,      // en fazla slot
+  randGap: 2,       // gelen kartlar aktif hedeften en az 2 küçük (level'da "gap" ile ezilebilir)
   slotsPerRow: 4,   // bir satırda en fazla 4 slot
-  lowBias: true     // küçük kartlar biraz daha sık gelsin
+  lowBias: true,    // küçük kartlar biraz daha sık gelsin
+  endless: { startTarget: 6, startSlots: 4, slotEvery: 3, maxSlots: 8 },  // Endless mod
+  pairChance: 0.09,    // ikili deste (ör. 4-3) gelme ihtimali
+  tripleChance: 0.03,  // üçlü deste (ör. 4-3-2) gelme ihtimali
+  specialChance: 0.07  // açılmış özel kartlardan biri gelme ihtimali (her el en fazla 1)
+};
+
+// ---------- Leveller ----------
+// targets : sırayla ulaşılacak hedefler (ardışık olmak zorunda değil)
+// slots   : başlangıçta açık slot sayısı
+// board   : açık slotlardaki başlangıç kartları, arkadan öne (ör. [3,2,1] -> 1 en önde)
+// unlocks : (ops.) kilitli slotların hangi hedef tamamlanınca açılacağı. Varsayılan: son hedef hariç her hedefte 1 slot -> targets.slice(0, -1)
+// gap     : (ops.) gelen kartların hedeften en az kaç küçük olacağı
+const LEVELS = [
+  { targets: [6],             slots: 4, board: [[1], [3], [4], []], hand: [1, 2, 3], tutorial: true },   // 1: tutorial
+  { targets: [6, 7],          slots: 3, board: [[3, 2, 1], [], [4, 3, 1]] },
+  { targets: [7, 8],          slots: 4, board: [[5, 3, 1], [], [4, 3, 2], []] },
+  { targets: [7, 9],          slots: 3, board: [[5, 3, 5], [], [3, 2, 1]] },                 // 4: desteli kartlar
+  { targets: [6, 8, 9],       slots: 3, board: [[4, 3, 1], [], [2]] },
+  { targets: [7, 9, 12],      slots: 4, board: [[3, 2, 1], [4, 3, 1], [], [5, 3, 5]] },      // 6: Joker Merge
+  { targets: [8, 10],         slots: 4, board: [[6, 5, 3], [], [4, 2, 1], []] },
+  { targets: [8, 10, 11],     slots: 4, board: [[5, 4, 2], [6, 3, 1], [], []] },             // 8: Joker Sort
+  { targets: [9, 11, 13],     slots: 4, board: [[7, 6, 5], [], [5, 3, 1], []] },
+  { targets: [7, 10, 12, 14], slots: 4, board: [[3, 2, 1], [6, 4, 2], [], [5, 3, 5]] },      // 10: Upgrade
+  { targets: [9, 12],         slots: 4, board: [[7, 5, 3], [6, 4], [], [2, 1]] },
+  { targets: [10, 12, 13],    slots: 4, board: [[8, 6, 4], [], [7, 5, 2], [3]] },            // 12: Blast
+  { targets: [9, 11, 14],     slots: 4, board: [[6, 4, 6], [], [5, 3, 1], []] },
+  { targets: [10, 13, 15],    slots: 4, board: [[8, 7, 5], [4, 2, 1], [], [6, 3]] },         // 14: Downgrade
+  { targets: [11, 13, 15],    slots: 4, board: [[9, 6, 3], [], [8, 5, 2], [7]] },
+  { targets: [8, 11, 14, 16], slots: 4, board: [[5, 4, 3], [7, 5, 2], [], [6, 1]] }
+];
+
+// ---------- Level 1 tutorial ----------
+// Her adımda yalnızca 'from' kaynağı 'to' slotuna sürüklenebilir; başka hamle yapılamaz
+const TUT_STEPS = [
+  { from: { type: 'hand', i: 0 }, to: 0, text: 'Drag the 1 onto the other 1' },
+  { from: { type: 'slot', si: 0 }, to: 1, text: 'Drag the 2 onto the 3' },
+  { from: { type: 'slot', si: 1 }, to: 2, text: 'Drag the 3-2 stack onto the 4' },
+  { from: { type: 'hand', i: 1 }, to: 2, text: 'Drag the 2 onto the stack' }
+];
+
+// ---------- Özellikler / özel kartlar ----------
+// level: hangi levelda açılır (1'den başlar), stage: Endless'ta hangi stage'de açılır
+const FEATURES = [
+  { id: 'stacks', level: 4,  stage: 3 },
+  { id: 'jmerge', level: 6,  stage: 4 },
+  { id: 'jsort',  level: 8,  stage: 6 },
+  { id: 'up',     level: 10, stage: 8 },
+  { id: 'blast',  level: 12, stage: 10 },
+  { id: 'down',   level: 14, stage: 12 }
+];
+const SPECIAL_IDS = ['jmerge', 'jsort', 'up', 'blast', 'down'];
+// Örnekler: a = taşınan, b = slottaki deste, r = sonuç (arkadan öne)
+const SP = {
+  jmerge: { name: 'Joker Merge', title: 'New card!', col: '#e9a91f', f: '#fde7a6', m: '#f7cf5c', dk: '#6b4f12',
+    desc: 'Becomes the same value as the card it lands on, so the two merge.',
+    ex: { a: ['jmerge'], b: [5, 3], r: [5, 4] } },
+  jsort: { name: 'Joker Sort', title: 'New card!', col: '#2fb3c4', f: '#bff0f5', m: '#82dbe6', dk: '#145566',
+    desc: 'Becomes one less than the card it lands on. It cannot go on a 1.',
+    ex: { a: ['jsort'], b: [8], r: [8, 7] } },
+  up: { name: 'Upgrade', title: 'New card!', col: '#4caf6a', f: '#cdeec0', m: '#8fd69a', dk: '#1d5a36',
+    desc: 'Raises every card in the slot by 1, then disappears.',
+    ex: { a: ['up'], b: [5, 3, 2], r: [6, 4, 3] } },
+  blast: { name: 'Blast', title: 'New card!', col: '#ef7a2e', f: '#ffd6b0', m: '#ffb47a', dk: '#6e3613',
+    desc: 'Blows up the slot and clears every card in it.',
+    ex: { a: ['blast'], b: [6, 4, 2], r: [] } },
+  down: { name: 'Downgrade', title: 'New card!', col: '#d9665a', f: '#fbc9c0', m: '#f39a8d', dk: '#6a2626',
+    desc: 'Lowers every card in the slot by 1 and removes the 1s, then disappears.',
+    ex: { a: ['down'], b: [4, 2, 1], r: [3, 1] } }
 };
 
 const LW = 540, LH = 960, RATIO = 1.36, HW = 92;
 const FONT = '"Fredoka", "Trebuchet MS", "Segoe UI", system-ui, sans-serif';
 const BOARD = { x: 16, y: 16, w: 508, h: 744 };
 const TRAY  = { x: 16, y: 772, w: 508, h: 172 };
-const BADGE = { x: 134, y: 50 };
-const PLUS = { x: 0, y: 48, r: 15 };
+const TOG = { x: 22, y: 31, w: 150, h: 34 };
 const BTNS = [{ x: 392, y: 54, id: 'help' }, { x: 440, y: 54, id: 'sound' }, { x: 488, y: 54, id: 'restart' }];
-const HELP_BTN = { x: 170, y: 676, w: 200, h: 60 };
-const OVER_BTN = { x: 160, y: 530, w: 220, h: 64 };
+const CHEAT = { x: 270, y: 108, r: 15 };
+const INTRO_BTN = { x: 170, y: 676, w: 200, h: 60 };
+const NAV = { prev: { x: 0, y: 48, r: 16 }, next: { x: 0, y: 48, r: 16 } };
+const HELP_BTN = { x: 170, y: 736, w: 200, h: 60 };
+const END_BTN = { x: 160, y: 486, w: 220, h: 64 };
 
 const PALETTE = [null,
   { f: '#f9b8ac', b: '#e97f6f', t: '#df5f4e' }, // 1
@@ -70,9 +136,11 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
 };
-let best = +store.get('sm_best', 0) || 0;
 let muted = store.get('sm_mute', '0') === '1';
 const seen = store.get('sm_seen', '0') === '1';
+let helpClicked = store.get('sm_help_clicked', '0') === '1';   // help butonuna bir kez basıldıysa sinyal bir daha yanmaz
+const E = CFG.endless;
+let bestCard = +store.get('sm_best_card', 0) || 0;   // Endless score: ulaşılan en büyük kart
 
 // ---------- Canvas ----------
 const cvs = document.getElementById('c');
@@ -126,28 +194,95 @@ function sfx(k, n = 1) {
       tone(f, 0.18, 'triangle', 0.15); tone(f * 2, 0.12, 'sine', 0.05, 0.02); break;
     }
     case 'stage': [0, 4, 7, 12].forEach((s, i) => tone(523 * Math.pow(2, s / 12), 0.22, 'triangle', 0.13, i * 0.08)); break;
+    case 'win': [0, 4, 7, 12, 16, 19, 24].forEach((s, i) => tone(523 * Math.pow(2, s / 12), 0.28, 'triangle', 0.13, i * 0.07)); break;
+    case 'unlock': tone(880, 0.12, 'sine', 0.08); tone(1320, 0.16, 'sine', 0.06, 0.06); break;
     case 'bad': tone(140, 0.12, 'square', 0.04); break;
+    case 'blast': [0, 1, 2].forEach(i => tone(110 - i * 20, 0.25, 'sawtooth', 0.07, i * 0.04)); tone(60, 0.4, 'square', 0.05); break;
+    case 'down': [0, -3, -6].forEach((s, i) => tone(520 * Math.pow(2, s / 12), 0.12, 'triangle', 0.1, i * 0.05)); break;
+    case 'joker': tone(660, 0.08, 'sine', 0.08); tone(990, 0.12, 'triangle', 0.08, 0.05); break;
     case 'fail': [0, -3, -7].forEach((s, i) => tone(330 * Math.pow(2, s / 12), 0.32, 'sine', 0.12, i * 0.16)); break;
   }
 }
 const vib = p => { try { navigator.vibrate && navigator.vibrate(p); } catch (e) {} };
 
 // ---------- Durum ----------
-let S, uid = 0, drag = null, parts = [], texts = [], fx = [];
+let S, uid = 0, drag = null, parts = [], texts = [];
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function mkCard(v, x, y) {
   return { id: uid++, v, x, y, w: HW, pop: 0, shake: 0, lift: 0, alpha: 1, ov: null, drag: false, sel: false };
 }
-function newGame() {
+function mkSpecial(kind, x, y) { const c = mkCard(0, x, y); c.kind = kind; return c; }
+const gapOf = lv => lv.gap == null ? CFG.randGap : lv.gap;
+function featOn(id) {
+  const f = FEATURES.find(x => x.id === id);
+  return S.mode === 'level' ? S.li + 1 >= f.level : S.stage >= f.stage;
+}
+
+function loadLevel(i, hint = true) {   // hint: help butonu dikkat çeksin
+  i = Math.max(0, Math.min(LEVELS.length - 1, i));
+  store.set('sm_level', i); store.set('sm_mode', 'level');
+  const lv = LEVELS[i], unlocks = lv.unlocks || lv.targets.slice(0, -1);
   S = {
-    slots: [], hand: [], target: CFG.startTarget, maxRand: CFG.startTarget - CFG.randGap,
-    stage: 1, slotCount: CFG.startSlots, busy: false, over: false, overT: 0,
-    sel: null, banner: null, tpop: 0, help: false
+    mode: 'level', li: i, lv, slots: [], locked: [], unpop: [], hand: [], ti: 0, maxCard: 0, mpop: 0,
+    target: lv.targets[0], maxRand: Math.max(1, lv.targets[0] - gapOf(lv)),
+    prog: 0, busy: false, end: null, endT: 0, sel: null, banner: null, tpop: 0, help: false, hint: hint && !helpClicked,
+    fly: [], ghosts: [], intro: null, pendingSpecial: null
   };
-  for (let i = 0; i < S.slotCount; i++) S.slots.push([]);
-  drag = null; parts = []; texts = []; fx = [];
+  S.tut = lv.tutorial ? 0 : null; S.fixedHand = lv.hand || null;
+  const feat = FEATURES.find(f => f.level === i + 1);   // bu levelda açılan özellik
+  if (feat) {
+    if (feat.id === 'stacks') S.pendingStack = true;          // desteler sessizce gelir; level başında 1 adet
+    else { S.pendingSpecial = feat.id; if (hint) S.intro = feat.id; }   // özel kart: tanıtım + altta 1 adet
+  }
+  for (let si = 0; si < lv.slots; si++) {
+    S.slots.push((lv.board[si] || []).map(v => mkCard(v, 0, 0)));
+    S.locked.push(0); S.unpop.push(0);
+  }
+  unlocks.forEach(u => { S.slots.push([]); S.locked.push(u); S.unpop.push(0); });
+  const L = layout();
+  S.slots.forEach((st, si) => {
+    const off = stackOff(L, si, st.length);
+    st.forEach((c, j) => { c.x = L.xs[si]; c.y = stackY(L, si, j, off) - 40 - j * 12; c.w = L.cw; });
+  });
+  drag = null; parts = []; texts = [];
   deal();
+}
+// Endless: level eklenmeden önceki session modu
+function loadEndless(hint = true) {
+  store.set('sm_mode', 'endless');
+  S = {
+    mode: 'endless', li: 0, lv: null, slots: [], locked: [], unpop: [], hand: [], ti: 0, stage: 1, maxCard: 0, mpop: 0,
+    target: E.startTarget, maxRand: Math.max(1, E.startTarget - CFG.randGap),
+    prog: 0, busy: false, end: null, endT: 0, sel: null, banner: null, tpop: 0, help: false, hint: hint && !helpClicked,
+    fly: [], ghosts: [], intro: null, pendingSpecial: null
+  };
+  for (let i = 0; i < E.startSlots; i++) { S.slots.push([]); S.locked.push(0); S.unpop.push(0); }
+  drag = null; parts = []; texts = [];
+  deal();
+}
+function restart() { S.mode === 'endless' ? loadEndless(false) : loadLevel(S.li, false); }
+function bumpMax(v) {
+  if (v > S.maxCard) S.maxCard = v;
+  if (S.mode === 'endless' && v > bestCard) { bestCard = v; S.mpop = 1; store.set('sm_best_card', v); }
+}
+function endlessStageUp() {
+  S.stage++; S.target++; S.maxRand++; S.tpop = 1;
+  let sub = 'Cards now 1–' + S.maxRand;
+  if ((S.stage - 1) % E.slotEvery === 0 && S.slots.length < E.maxSlots) {
+    S.slots.push([]); S.locked.push(0); S.unpop.push(1); sub = '+1 slot unlocked'; sfx('unlock');
+  }
+  S.banner = { text: 'Stage ' + S.stage, sub, t: 0 };
+  sfx('stage'); vib([20, 40, 20]);
+  const f = FEATURES.find(x => x.stage === S.stage);   // Endless'ta özellik açılışı
+  if (f) {
+    if (f.id !== 'stacks') {   // desteler tanıtılmadan havuza girer
+      S.intro = f.id;
+      const e = S.hand.findIndex(it => !it);
+      if (e >= 0) { const p = handCardPos(e, 0, 1); S.hand[e] = { cards: [mkSpecial(f.id, p.x, LH + 40)] }; }
+      else S.pendingSpecial = f.id;
+    }
+  }
 }
 function randVal() {
   const m = S.maxRand, w = [];
@@ -157,40 +292,84 @@ function randVal() {
   for (let v = 1; v <= m; v++) { r -= w[v - 1]; if (r <= 0) return v; }
   return m;
 }
-function deal() {
-  for (let i = 0; i < CFG.handSize; i++) {
-    const p = handPos(i);
-    S.hand[i] = mkCard(randVal(), p.x, LH + 40 + i * 70);
+// Havuzdan bir el öğesi: tek kart, ikili/üçlü deste ya da özel kart
+function genItem(allowSpecial) {
+  const specials = SPECIAL_IDS.filter(featOn);
+  if (allowSpecial && specials.length && Math.random() < CFG.specialChance)
+    return { cards: [mkSpecial(specials[Math.floor(Math.random() * specials.length)], 0, 0)] };
+  let n = 1;
+  if (featOn('stacks')) {
+    const r = Math.random();
+    n = r < CFG.tripleChance ? 3 : r < CFG.tripleChance + CFG.pairChance ? 2 : 1;
+    n = Math.min(n, S.maxRand);
   }
+  let v = randVal();
+  if (v < n) v = n + Math.floor(Math.random() * (S.maxRand - n + 1));
+  return { cards: Array.from({ length: n }, (_, j) => mkCard(v - j, 0, 0)) };   // arkadan öne: 4-3-2
+}
+function deal() {
+  if (S.fixedHand) {   // tutorial eli
+    S.fixedHand.forEach((v, i) => { const p = handCardPos(i, 0, 1); S.hand[i] = { cards: [mkCard(v, p.x, LH + 40 + i * 70)] }; });
+    S.fixedHand = null; sfx('deal'); return;
+  }
+  let specialUsed = false;
+  for (let i = 0; i < CFG.handSize; i++) {
+    let it;
+    if (S.pendingSpecial && i === 1) { it = { cards: [mkSpecial(S.pendingSpecial, 0, 0)] }; S.pendingSpecial = null; specialUsed = true; }
+    else if (S.pendingStack && i === 1) {
+      const v = Math.max(2, randVal()); it = { cards: [mkCard(v, 0, 0), mkCard(v - 1, 0, 0)] }; S.pendingStack = false;
+    }
+    else { it = genItem(!specialUsed); if (it.cards[0].kind) specialUsed = true; }
+    it.cards.forEach((c, j) => { const p = handCardPos(i, j, it.cards.length); c.x = p.x; c.y = LH + 40 + i * 70 + (p.y - handCardPos(i, 0, it.cards.length).y); c.w = p.w; });
+    S.hand[i] = it;
+  }
+  if (S.pendingSpecial) { S.hand[1] = { cards: [mkSpecial(S.pendingSpecial, handPos(1).x, LH + 40)] }; S.pendingSpecial = null; }
   sfx('deal');
 }
 
 // ---------- Yerleşim ----------
 function layout() {
-  const n = S.slotCount, per = CFG.slotsPerRow, rows = Math.ceil(n / per);
+  const n = S.slots.length, per = CFG.slotsPerRow, rows = Math.ceil(n / per);
   const cols = Math.min(n, per), gap = 16, avail = BOARD.w - 32;
-  const top = BOARD.y + 130, bottom = BOARD.y + BOARD.h - 22;
+  const top = BOARD.y + 175, bottom = BOARD.y + BOARD.h - 22;
   const rowH = (bottom - top) / rows;
   let cw = Math.min(100, (avail - gap * (cols - 1)) / cols);
   if (rows > 1) cw = Math.min(cw, 86);
   const ch = cw * RATIO, xs = [], ys = [], lim = [], row = [];
+  const y1 = rows === 1 ? top + (bottom - top - ch) / 2 : top;   // tek satırda dikeyde ortala
   for (let i = 0; i < n; i++) {
     const r = Math.floor(i / per), inRow = Math.min(per, n - r * per);
     const total = cw * inRow + gap * (inRow - 1), x0 = BOARD.x + (BOARD.w - total) / 2;
     xs.push(x0 + (i % per) * (cw + gap));
-    ys.push(top + r * rowH);
+    ys.push(rows === 1 ? y1 : top + r * rowH);
     lim.push(r < rows - 1 ? top + (r + 1) * rowH - 18 : bottom);
     row.push(r);
   }
   return { n, rows, gap, cw, ch, xs, ys, lim, row };
 }
+// Ardışık olmayan iki kartın arası (ör. 7 ile arkasındaki 2) diğerlerinden daha açık
+const BREAK = 0.6;   // ekstra aralık, normal aralığın katı
+const isBreak = (st, i) => i > 0 && i < st.length && st[i].v !== st[i - 1].v - 1;
 function stackOff(L, si, len) {
-  const base = L.cw * 0.34;
-  if (len <= 1) return base;
+  const base = L.cw * 0.34, st = S.slots[si];
+  let units = Math.max(0, len - 1);
+  for (let i = 1; i < len; i++) if (isBreak(st, i)) units += BREAK;
+  if (units <= 0) return base;
   const room = L.lim[si] - L.ys[si] - L.ch;
-  return Math.max(8, Math.min(base, room / (len - 1)));
+  return Math.max(8, Math.min(base, room / units));
+}
+function stackY(L, si, i, off) {
+  const st = S.slots[si];
+  let y = L.ys[si];
+  for (let k = 1; k <= i; k++) y += off * (1 + (isBreak(st, k) ? BREAK : 0));
+  return y;
 }
 function handPos(i) { return { x: LW / 2 - HW / 2 + (i - 1) * 128, y: TRAY.y + (TRAY.h - HW * RATIO) / 2 }; }
+// Eldeki desteler: arkadaki kartların köşe numaraları okunsun diye kartlar biraz küçülür, aralık açılır
+function handCardPos(i, j, n) {
+  const w = n === 1 ? HW : n === 2 ? 86 : 78, off = w * 0.34;
+  return { x: LW / 2 - w / 2 + (i - 1) * 128, y: TRAY.y + (TRAY.h - w * RATIO - (n - 1) * off) / 2 + j * off, w };
+}
 function slotAt(x, y) {
   const L = layout();
   for (let si = 0; si < L.n; si++) {
@@ -203,6 +382,7 @@ function slotAt(x, y) {
 
 // ---------- Kurallar ----------
 function canPlace(v, si) {
+  if (S.locked[si]) return false;              // kilitli slot
   const st = S.slots[si];
   if (!st.length) return true;                 // boş slot
   const top = st[st.length - 1].v;
@@ -214,25 +394,45 @@ function runStart(si) {                        // öndeki ardışık seri
   while (k > 0 && st[k - 1].v === st[k].v + 1) k--;
   return k;
 }
+// Özel kartlar boş slota konamaz; Joker Sort 1'in üzerine konamaz
+function specialFits(kind, si) {
+  const st = S.slots[si];
+  return !S.locked[si] && st.length > 0 && (kind !== 'jsort' || st[st.length - 1].v > 1);
+}
+function itemFits(c0, si) { return c0.kind ? specialFits(c0.kind, si) : canPlace(c0.v, si); }
+const tutStep = () => S.tut != null && S.tut < TUT_STEPS.length ? TUT_STEPS[S.tut] : null;
+function tutAllows(from, si) {
+  const st = tutStep();
+  if (!st) return true;
+  if (st.from.type !== from.type) return false;
+  if (from.type === 'hand' ? from.i !== st.from.i : from.si !== st.from.si) return false;
+  return si == null || si === st.to;
+}
 function legal(from, si) {
-  if (from.type === 'hand') { const c = S.hand[from.i]; return !!c && canPlace(c.v, si); }
+  if (!tutAllows(from, si)) return false;
+  if (from.type === 'hand') { const it = S.hand[from.i]; return !!it && itemFits(it.cards[0], si); }
   if (from.si === si) return false;
   const c = S.slots[from.si][from.k];
   return !!c && canPlace(c.v, si);
 }
+
 // Fail kontrolü: eldeki kartlardan biri şimdi ya da board'daki taşımalarla (merge'ler dahil) yerleşebiliyor mu?
 function simMerge(st, i) { while (i > 0 && i < st.length && st[i] === st[i - 1]) { st.splice(i, 1); st[i - 1]++; i--; } }
 function canEscape() {
-  const hand = S.hand.filter(Boolean).map(c => c.v);
+  const hand = S.hand.filter(Boolean).map(it => it.cards[0].kind ? { kind: it.cards[0].kind } : { v: it.cards[0].v });
   if (!hand.length) return true;
-  const fits = (sl, v) => sl.some(st => !st.length || st[st.length - 1] === v || st[st.length - 1] === v + 1);
+  const fits = (sl, h) => sl.some(st => {
+    const top = st[st.length - 1];
+    if (h.kind) return st.length > 0 && (h.kind !== 'jsort' || top > 1);
+    return !st.length || top === h.v || top === h.v + 1;
+  });
   const key = sl => sl.map(st => st.join(',')).join('|');
-  const start = S.slots.map(st => st.map(c => c.v));
-  const seen = new Set([key(start)]), q = [start];
+  const start = S.slots.filter((_, si) => !S.locked[si]).map(st => st.map(c => c.v));
+  const seenS = new Set([key(start)]), q = [start];
   while (q.length) {
-    if (seen.size > 5000) return true;           // arama çok büyürse oyuncuyu haksız yere bitirme
+    if (seenS.size > 5000) return true;
     const sl = q.shift();
-    if (hand.some(v => fits(sl, v))) return true;
+    if (hand.some(h => fits(sl, h))) return true;
     for (let si = 0; si < sl.length; si++) {
       const st = sl[si];
       if (!st.length) continue;
@@ -248,18 +448,18 @@ function canEscape() {
         const run = n[si].splice(k), j = n[di].length;
         n[di].push(...run); simMerge(n[di], j);
         const kk = key(n);
-        if (!seen.has(kk)) { seen.add(kk); q.push(n); }
+        if (!seenS.has(kk)) { seenS.add(kk); q.push(n); }
       }
     }
   }
   return false;
 }
-function anyPlaceable() { return S.hand.some(c => c && S.slots.some((_, si) => canPlace(c.v, si))); }
-function cardsOf(from) { return from.type === 'hand' ? [S.hand[from.i]] : S.slots[from.si].slice(from.k); }
+
+function cardsOf(from) { return from.type === 'hand' ? S.hand[from.i].cards : S.slots[from.si].slice(from.k); }
 function sameFrom(a, b) {
   return !!a && !!b && a.type === b.type && (a.type === 'hand' ? a.i === b.i : (a.si === b.si && a.k === b.k));
 }
-function allCards() { const a = []; S.slots.forEach(st => a.push(...st)); S.hand.forEach(c => c && a.push(c)); return a; }
+function allCards() { const a = []; S.slots.forEach(st => a.push(...st)); S.hand.forEach(it => it && a.push(...it.cards)); a.push(...S.fly); return a; }
 function setSel(from) { clearSel(); S.sel = from; cardsOf(from).forEach(c => c.sel = true); sfx('tick'); }
 function clearSel() { S.sel = null; allCards().forEach(c => c.sel = false); }
 
@@ -267,11 +467,85 @@ function doMove(from, si) { from.type === 'hand' ? placeFromHand(from.i, si) : m
 
 async function placeFromHand(hi, si) {
   S.busy = true; clearSel();
-  const c = S.hand[hi]; S.hand[hi] = null; c.lift = 0.3;
-  const st = S.slots[si]; st.push(c); sfx('place');
-  await sleep(85);
-  await resolve(si, st.length - 1);
+  const it = S.hand[hi]; S.hand[hi] = null;
+  const c0 = it.cards[0];
+  if (c0.kind) await applySpecial(c0, si);
+  else {
+    const st = S.slots[si], j = st.length;
+    it.cards.forEach(c => { c.lift = 0.3; bumpMax(c.v); });
+    st.push(...it.cards); sfx('place');
+    await sleep(85);
+    await resolve(si, j);
+  }
   afterMove();
+}
+const cardCenter = c => [c.x + c.w / 2, c.y + c.w * RATIO / 2];
+async function applySpecial(c, si) {
+  const st = S.slots[si], top = st[st.length - 1], col = SP[c.kind].col;
+  if (c.kind === 'jmerge' || c.kind === 'jsort') {     // joker: değere dönüşür, sonra normal kart gibi davranır
+    c.lift = 0.3; st.push(c); sfx('place');
+    await sleep(150);
+    c.v = c.kind === 'jmerge' ? top.v : top.v - 1;
+    c.kind = null; c.pop = 1; bumpMax(c.v);
+    burst(...cardCenter(c), [col, '#ffffff', pal(c.v).b], 16); sfx('joker');
+    await sleep(110);
+    await resolve(si, st.length - 1);
+    return;
+  }
+  S.fly.push(c); c.flySi = si; sfx('place');           // up / down / blast: slota uçar, etkisini yapar ve yok olur
+  await sleep(170);
+  S.fly = S.fly.filter(x => x !== c);
+  burst(...cardCenter(c), [col, '#ffffff'], 18);
+  if (c.kind === 'blast') {
+    // veri anında boşalır; kartlar görselde alttan (öndeki) yukarı doğru tek tek patlar
+    const G = S, order = st.slice().reverse(), STEP = 70;
+    G.ghosts.push(...st); st.length = 0;   // çizim sırası arkadan öne kalsın
+    sfx('blast'); vib([40, 30, 40]);
+    order.forEach((x, n) => setTimeout(() => {
+      if (S !== G) return;
+      G.ghosts = G.ghosts.filter(g => g !== x);
+      burst(...cardCenter(x), [pal(x.v).b, pal(x.v).f, '#ffd166'], 14);
+      tone(140 - n * 12, 0.12, 'sawtooth', 0.05); vib(10);
+    }, 60 + n * STEP));
+    await sleep(60 + order.length * STEP + 60);
+    return;
+  }
+  // Upgrade / Downgrade: veri anında değişir; görsel değişim alttaki (öndeki) karttan yukarı doğru tek tek oynar
+  const G = S, order = st.slice().reverse(), STEP = 75, d = c.kind === 'up' ? 1 : -1;
+  st.forEach(x => { x.dv = x.v; x.v += d; if (d > 0) bumpMax(x.v); });
+  if (d < 0) {
+    for (let k = st.length - 1; k >= 0; k--) if (st[k].v < 1) { G.ghosts.push(st[k]); st.splice(k, 1); }   // 1'ler: veriden hemen çıkar, görselde sırası gelince patlar
+  }
+  vib(15);
+  order.forEach((x, n) => setTimeout(() => {
+    if (S !== G) return;
+    x.dv = null;
+    if (x.v < 1) {
+      G.ghosts = G.ghosts.filter(g => g !== x);
+      burst(...cardCenter(x), [pal(1).b, pal(1).f], 12);
+    } else {
+      x.pop = 1;
+      burst(...cardCenter(x), [pal(x.v).b, '#ffffff'], 6);
+    }
+    tone(d > 0 ? 440 * Math.pow(2, n * 2 / 12) : 660 * Math.pow(2, -n * 2 / 12), 0.1, 'triangle', 0.09);
+  }, n * STEP));
+  await sleep(order.length * STEP + 80);
+  if (d > 0) {
+    let m;
+    while (!S.won && !S.end && st.length && (m = st.reduce((a, b) => b.v > a.v ? b : a)) && m.v >= S.target) await reach(m);
+  } else {
+    await settle(si);
+  }
+}
+// Destede yan yana eşit kart kalmayana kadar merge et (Downgrade sonrası)
+async function settle(si) {
+  for (;;) {
+    const st = S.slots[si];
+    let i = -1;
+    for (let k = st.length - 1; k > 0; k--) if (st[k].v === st[k - 1].v) { i = k; break; }
+    if (i < 0) return;
+    await resolve(si, i);
+  }
 }
 async function moveRun(si, k, di) {
   S.busy = true; clearSel();
@@ -292,36 +566,58 @@ async function resolve(si, i) {
     a.ov = b;
     await sleep(chain ? 60 : 75);
     st.splice(i, 1);
-    b.v++; b.pop = 1; chain++; i--;
+    b.v++; b.pop = 1; chain++; i--; bumpMax(b.v);
     burst(b.x + b.w / 2, b.y + b.w * RATIO / 2, [pal(b.v).b, pal(b.v).f], 12 + chain * 4);
     sfx('merge', chain); vib(12);
     if (chain >= 2) addText(b.x + b.w / 2, b.y - 4, 'x' + chain, pal(b.v).t, 26 + chain * 3);
     await sleep(105);
-    if (b.v >= S.target) await collect(si, i);
+    if (!S.end && !S.won && b.v >= S.target) await reach(b);
   }
 }
-async function collect(si, i) {
-  const c = S.slots[si][i];   // kart board'da kalır
+// Hedefe ulaşıldı: kart board'da kalır, tamamlanan hedefe bağlı kilitli slot açılır ve sıradaki hedefe geçilir.
+async function reach(c) {
   c.pop = 1;
-  const cx = c.x + c.w / 2, cy = c.y + c.w * RATIO / 2;
-  burst(cx, cy, ['#ffd166', '#62dbe6', pal(c.v).b, '#ffffff'], 40);
-  stageUp();
+  burst(c.x + c.w / 2, c.y + c.w * RATIO / 2, ['#ffd166', '#62dbe6', pal(c.v).b, '#ffffff'], 40);
+  if (S.mode === 'endless') {
+    endlessStageUp();
+    await sleep(170);
+    return;
+  }
+  const done = S.target;
+  S.ti++; S.tpop = 1;
+  if (S.ti >= S.lv.targets.length) { S.won = true; sfx('win'); vib([30, 50, 30]); await sleep(150); return; }
+  S.target = S.lv.targets[S.ti];
+  S.maxRand = Math.max(1, S.target - gapOf(S.lv));
+  let opened = 0;
+  const L = layout();
+  S.locked.forEach((u, k) => {
+    if (u && u <= done) {
+      S.locked[k] = 0; S.unpop[k] = 1; opened++;
+      burst(L.xs[k] + L.cw / 2, L.ys[k] + L.ch / 2, ['#ffd166', '#62dbe6', '#ffffff'], 26);
+    }
+  });
+  S.banner = { text: 'Target ' + done + ' reached', sub: 'Next target: ' + S.target + (opened ? '  ·  +' + opened + ' slot' : ''), t: 0 };
+  sfx('stage'); if (opened) sfx('unlock'); vib([20, 40, 20]);
   await sleep(170);
 }
-function stageUp(cheat = false) {
-  S.stage++; S.target++; S.maxRand++; S.tpop = 1;
-  let sub = 'Cards now 1–' + S.maxRand;
-  if ((S.stage - 1) % CFG.slotEvery === 0 && S.slotCount < CFG.maxSlots) {
-    S.slotCount++; S.slots.push([]); sub = '+1 slot unlocked';
-  }
-  S.banner = { text: 'Stage ' + S.stage, sub, t: 0 };
-  sfx('stage'); vib([20, 40, 20]);
-  if (!cheat && S.stage > best) { best = S.stage; store.set('sm_best', best); }
-}
 function afterMove() {
+  const G = S;
+  if (tutStep()) {   // tutorial adımı tamamlandı
+    S.tut++;
+    if (!tutStep()) S.banner = { text: 'Well done!', sub: 'Now reach the target', t: 0 };
+  }
+  if (S.won) {
+    setTimeout(() => {
+      if (S !== G) return;
+      S.end = 'win'; S.endT = 0; S.busy = false;
+      for (let i = 0; i < 6; i++) burst(80 + Math.random() * 380, 200 + Math.random() * 400,
+        ['#ffd166', '#62dbe6', '#f9b8ac', '#d5f1a8', '#d5c7fa'], 22);
+    }, 450);
+    return;
+  }
   if (S.hand.every(c => !c)) deal();
   if (!canEscape()) {
-    setTimeout(() => { S.over = true; S.overT = 0; S.busy = false; sfx('fail'); vib(80); }, 380);
+    setTimeout(() => { if (S !== G) return; S.end = 'fail'; S.endT = 0; S.busy = false; sfx('fail'); vib(80); }, 380);
   } else {
     S.busy = false;
   }
@@ -344,26 +640,45 @@ function pt(e) {
 }
 const inRect = (p, b) => p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h;
 const hitC = (c, p) => p.x >= c.x && p.x <= c.x + c.w && p.y >= c.y && p.y <= c.y + c.w * RATIO;
+const canNav = () => !S.busy || !!S.end;
 
+function goLevel(d) {
+  if (S.mode !== 'level') return;
+  const n = S.li + d;
+  if (n < 0 || n >= LEVELS.length || !canNav()) return;
+  sfx('tick'); loadLevel(n);
+}
 function hitButtons(p) {
-  if (Math.hypot(p.x - PLUS.x, p.y - PLUS.y) < PLUS.r + 8) {
-    if (!S.busy && !S.over && !S.help) { clearSel(); stageUp(true); }
+  if (S.mode === 'endless' && Math.hypot(p.x - CHEAT.x, p.y - CHEAT.y) < CHEAT.r + 8) {
+    if (!S.busy && !S.end && !S.help) { clearSel(); endlessStageUp(); }   // hile: stage atla
     return true;
   }
+  if (inRect(p, TOG)) {
+    const want = p.x > TOG.x + TOG.w / 2 ? 'endless' : 'level';
+    if (want !== S.mode && canNav()) { sfx('tick'); want === 'endless' ? loadEndless() : loadLevel(+store.get('sm_level', 0) || 0); }
+    return true;
+  }
+  if (S.mode === 'level' && Math.hypot(p.x - NAV.prev.x, p.y - NAV.prev.y) < NAV.prev.r + 8) { goLevel(-1); return true; }
+  if (S.mode === 'level' && Math.hypot(p.x - NAV.next.x, p.y - NAV.next.y) < NAV.next.r + 8) { goLevel(1); return true; }
   for (const b of BTNS) {
     if (Math.hypot(p.x - b.x, p.y - b.y) < 24) {
-      if (b.id === 'help') { if (!S.over) { S.help = !S.help; clearSel(); } }
+      if (b.id === 'help') { if (!S.end) { S.help = !S.help; S.hint = false; clearSel(); helpClicked = true; store.set('sm_help_clicked', '1'); } }
       else if (b.id === 'sound') { muted = !muted; store.set('sm_mute', muted ? '1' : '0'); }
-      else if (b.id === 'restart') { if (!S.busy || S.over) newGame(); }
+      else if (b.id === 'restart') { if (canNav()) restart(); }
       return true;
     }
   }
   return false;
 }
 function pickCard(p) {
+  const r = pickAny(p);
+  if (tutStep() && (r === 'blocked' || (r && !tutAllows(r.from)))) return null;   // tutorial'da diğer kartlar tepki vermez
+  return r;
+}
+function pickAny(p) {
   for (let i = 0; i < S.hand.length; i++) {
-    const c = S.hand[i];
-    if (c && hitC(c, p)) return { from: { type: 'hand', i }, cards: [c] };
+    const it = S.hand[i];
+    if (it && it.cards.some(c => hitC(c, p))) return { from: { type: 'hand', i }, cards: it.cards };
   }
   for (let si = 0; si < S.slots.length; si++) {
     const st = S.slots[si];
@@ -371,7 +686,7 @@ function pickCard(p) {
       if (hitC(st[j], p)) {
         const k = runStart(si);
         if (j >= k) return { from: { type: 'slot', si, k }, cards: st.slice(k) };
-        st[j].shake = 1; sfx('bad');
+        if (!tutStep()) { st[j].shake = 1; sfx('bad'); }
         return 'blocked';
       }
     }
@@ -383,8 +698,15 @@ cvs.addEventListener('pointerdown', e => {
   e.preventDefault(); initAudio();
   const p = pt(e);
   if (hitButtons(p)) return;
-  if (S.help) { if (inRect(p, HELP_BTN)) { S.help = false; store.set('sm_seen', '1'); } return; }
-  if (S.over) { if (inRect(p, OVER_BTN)) newGame(); return; }
+  if (S.intro) { if (inRect(p, INTRO_BTN)) { S.intro = null; sfx('tick'); } return; }
+  if (S.help) { if (inRect(p, HELP_BTN)) { S.help = false; store.set('sm_seen', '1'); sfx('tick'); } return; }
+  if (S.end) {
+    if (inRect(p, END_BTN)) {
+      if (S.end === 'win') loadLevel(S.li + 1 < LEVELS.length ? S.li + 1 : 0);
+      else restart();
+    }
+    return;
+  }
   if (S.busy) return;
   if (S.sel) {
     const si = slotAt(p.x, p.y);
@@ -416,13 +738,17 @@ function endDrag(cancel) {
     const c0 = d.cards[0];
     const si = slotAt(c0.x + c0.w / 2, c0.y + c0.w * 0.5);
     if (si >= 0 && legal(d.from, si)) doMove(d.from, si);
-    else if (si >= 0 && !(d.from.type === 'slot' && d.from.si === si)) { d.cards.forEach(c => c.shake = 1); sfx('bad'); }
+    else if (si >= 0 && !tutStep() && !(d.from.type === 'slot' && d.from.si === si)) { d.cards.forEach(c => c.shake = 1); sfx('bad'); }
   } else {
     if (d.wasSel) clearSel(); else setSel(d.from);
   }
 }
 cvs.addEventListener('pointerup', () => endDrag(false));
 cvs.addEventListener('pointercancel', () => endDrag(true));
+window.addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft') goLevel(-1);
+  else if (e.key === 'ArrowRight') goLevel(1);
+});
 
 // ---------- Güncelleme ----------
 function approach(c, tx, ty, tw, k) { c.x += (tx - c.x) * k; c.y += (ty - c.y) * k; c.w += (tw - c.w) * k; }
@@ -433,33 +759,37 @@ function update(dt) {
     const off = stackOff(L, si, st.length);
     st.forEach((c, i) => {
       if (c.drag) return;
-      let tx = L.xs[si], ty = L.ys[si] + i * off;
+      let tx = L.xs[si], ty = stackY(L, si, i, off);
       if (c.sel) ty -= 14;
       if (c.ov) { tx = c.ov.x; ty = c.ov.y; }
       approach(c, tx, ty, L.cw, c.ov ? kf : k);
     });
   });
-  S.hand.forEach((c, i) => {
-    if (!c || c.drag) return;
-    const p = handPos(i);
-    approach(c, p.x, p.y - (c.sel ? 14 : 0), HW, k);
+  S.hand.forEach((it, i) => {
+    if (!it) return;
+    it.cards.forEach((c, j) => {
+      if (c.drag) return;
+      const p = handCardPos(i, j, it.cards.length);
+      approach(c, p.x, p.y - (c.sel ? 14 : 0), p.w, k);
+    });
+  });
+  S.fly.forEach(c => {
+    const st = S.slots[c.flySi], off = stackOff(L, c.flySi, st.length);
+    approach(c, L.xs[c.flySi], stackY(L, c.flySi, Math.max(0, st.length - 1), off) + 10, L.cw, kf);
   });
   if (drag && drag.moved) {
     const off = L.cw * 0.34;
     drag.cards.forEach((c, i) => approach(c, drag.px - drag.fx * L.cw, drag.py - drag.fy * L.cw + i * off, L.cw, kd));
   }
-  for (let i = fx.length - 1; i >= 0; i--) {
-    const c = fx[i];
-    approach(c, BADGE.x - c.w / 2, BADGE.y - c.w * RATIO / 2, 34, kf);
-    c.alpha -= dt * 2.4;
-    if (c.alpha <= 0) fx.splice(i, 1);
-  }
-  [...allCards(), ...fx].forEach(c => {
+  allCards().forEach(c => {
     c.pop = Math.max(0, c.pop - dt * 5);
     c.shake = Math.max(0, c.shake - dt * 4);
     c.lift = Math.max(0, c.lift - dt);
   });
+  S.unpop = S.unpop.map(u => Math.max(0, u - dt * 2));
   S.tpop = Math.max(0, S.tpop - dt * 3.5);
+  if (S.lv) S.prog += (S.ti / S.lv.targets.length - S.prog) * (1 - Math.exp(-dt * 8));
+  S.mpop = Math.max(0, S.mpop - dt * 3.5);
   for (let i = parts.length - 1; i >= 0; i--) {
     const p = parts[i];
     p.vy += 650 * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt;
@@ -470,13 +800,14 @@ function update(dt) {
     t.y -= 45 * dt; t.life -= dt * 1.1;
     if (t.life <= 0) texts.splice(i, 1);
   }
-  if (S.banner) { S.banner.t += dt; if (S.banner.t > 1.5) S.banner = null; }
-  if (S.over) S.overT = Math.min(1, S.overT + dt * 4);
+  if (S.banner) { S.banner.t += dt; if (S.banner.t > 1.6) S.banner = null; }
+  if (S.end) S.endT = Math.min(1, S.endT + dt * 4);
 }
 
 // ---------- Çizim ----------
 function drawCard(c) {
-  const w = c.w, h = w * RATIO, p = pal(c.v);
+  const val = c.dv != null ? c.dv : c.v;   // dv: animasyon bitene kadar gösterilen eski değer
+  const w = c.w, h = w * RATIO, p = c.ghost ? { f: '#f3e6d6', b: '#d2b998', t: '#bb9c7a' } : pal(val);
   const s = 1 + 0.24 * Math.sin(Math.PI * c.pop);
   const sh = c.shake > 0 ? Math.sin(c.shake * 40) * 6 * c.shake : 0;
   const r = w * 0.16;
@@ -487,20 +818,177 @@ function drawCard(c) {
   if (c.rot) ctx.rotate(c.rot);
   ctx.fillStyle = c.drag ? 'rgba(110,70,40,0.24)' : 'rgba(110,70,40,0.13)';
   rr(-w / 2, -h / 2 + (c.drag ? 9 : 3), w, h, r); ctx.fill();
+  if (c.kind) { drawSpecialFace(c.kind, w, h, r, c); ctx.restore(); return; }
   rr(-w / 2, -h / 2, w, h, r); ctx.fillStyle = p.f; ctx.fill();
-  ctx.lineWidth = Math.max(2, w * 0.045); ctx.strokeStyle = p.b; ctx.stroke();
-  rr(-w / 2 + w * 0.08, -h / 2 + w * 0.08, w * 0.84, h - w * 0.16, r * 0.7);
-  ctx.strokeStyle = 'rgba(255,255,255,0.45)'; ctx.lineWidth = w * 0.025; ctx.stroke();
+  ctx.lineWidth = Math.max(1.5, w * 0.045); ctx.strokeStyle = p.b; ctx.stroke();
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillStyle = p.b; ctx.font = `700 ${w * 0.17}px ${FONT}`;
-  ctx.fillText(c.v, -w / 2 + w * 0.16, -h / 2 + w * 0.17);
-  ctx.save(); ctx.rotate(Math.PI); ctx.fillText(c.v, -w / 2 + w * 0.16, -h / 2 + w * 0.17); ctx.restore();
-  ctx.font = `700 ${w * (c.v >= 10 ? 0.42 : 0.54)}px ${FONT}`;
+  if (!c.mini) {
+    rr(-w / 2 + w * 0.08, -h / 2 + w * 0.08, w * 0.84, h - w * 0.16, r * 0.7);
+    ctx.strokeStyle = 'rgba(255,255,255,0.45)'; ctx.lineWidth = w * 0.025; ctx.stroke();
+    ctx.fillStyle = p.b; ctx.font = `700 ${w * 0.17}px ${FONT}`;
+    ctx.fillText(val, -w / 2 + w * 0.16, -h / 2 + w * 0.17);
+    ctx.save(); ctx.rotate(Math.PI); ctx.fillText(val, -w / 2 + w * 0.16, -h / 2 + w * 0.17); ctx.restore();
+  }
+  if (c.peek) {   // help illüstrasyonları: arkadaki kartların değeri üst şeritte okunsun
+    ctx.fillStyle = p.t; ctx.font = `700 ${w * 0.27}px ${FONT}`; ctx.textAlign = 'left';
+    ctx.fillText(val, -w / 2 + w * 0.12, -h / 2 + w * 0.19); ctx.textAlign = 'center';
+  }
+  ctx.font = `700 ${w * (val >= 10 ? 0.42 : 0.54)}px ${FONT}`;
   ctx.lineJoin = 'round'; ctx.lineWidth = w * 0.07; ctx.strokeStyle = 'rgba(255,255,255,0.75)';
-  ctx.strokeText(c.v, 0, h * 0.03);
-  ctx.fillStyle = p.t; ctx.fillText(c.v, 0, h * 0.03);
+  ctx.strokeText(val, 0, h * 0.03);
+  ctx.fillStyle = p.t; ctx.fillText(val, 0, h * 0.03);
   ctx.restore();
 }
+// ---------- Özel kart görünümü ----------
+// Pastel zemin + renkli çerçeve, yumuşak nabız parlaması, kayan ışık şeridi, parıltılar ve tek bir ikon
+// Tutorial rehberi: talimat balonu, hedef slot parlaması ve kaynaktan hedefe kayan hayalet kart + parmak
+function drawTutorialGuide() {
+  const st = tutStep(), L = layout(), t = performance.now() / 1000;
+  // talimat
+  ctx.save();
+  rr(50, 168, 440, 52, 26); ctx.fillStyle = '#ffffff'; ctx.shadowColor = 'rgba(110,70,40,0.18)'; ctx.shadowBlur = 12; ctx.fill();
+  ctx.restore();
+  rr(64, 180, 52, 28, 14); ctx.fillStyle = '#d4f5f8'; ctx.fill();
+  text((S.tut + 1) + '/' + TUT_STEPS.length, 90, 195, 15, '#1f9fb2', 700);
+  text(st.text, 300, 195, 18, '#7a5a3c', 600);
+  if (S.busy || (drag && drag.moved)) return;
+  // hedef slot
+  const dst = S.slots[st.to], off = stackOff(L, st.to, dst.length);
+  const ty = stackY(L, st.to, Math.max(0, dst.length - 1), off);
+  ctx.save(); ctx.globalAlpha = 0.6 + 0.4 * Math.sin(t * 5); glow(L.xs[st.to], ty, L.cw, L.ch, true); ctx.restore();
+  // kaynak
+  let src;
+  if (st.from.type === 'hand') { const it = S.hand[st.from.i]; src = it && it.cards; }
+  else { const sst = S.slots[st.from.si]; src = sst.length ? sst.slice(runStart(st.from.si)) : null; }
+  if (!src || !src.length) return;
+  const c0 = src[0], ph = (t / 1.9) % 1;
+  const u = Math.min(1, Math.max(0, (ph - 0.15) / 0.55)), e = u * u * (3 - 2 * u);
+  const ex = L.xs[st.to], ey = stackY(L, st.to, Math.max(0, dst.length - 1), off) + (dst.length ? off : 0);
+  const qx = (c0.x + ex) / 2, qy = Math.min(c0.y, ey) - 60;
+  const gx = (1 - e) * (1 - e) * c0.x + 2 * (1 - e) * e * qx + e * e * ex;
+  const gy = (1 - e) * (1 - e) * c0.y + 2 * (1 - e) * e * qy + e * e * ey;
+  const gw = c0.w + (L.cw - c0.w) * e;
+  const alpha = ph < 0.1 ? ph / 0.1 : ph > 0.82 ? Math.max(0, (1 - ph) / 0.18) : 1;
+  src.forEach((c, j) => drawCard({ x: gx, y: gy + j * gw * 0.34, w: gw, v: c.v, pop: 0, shake: 0, alpha: alpha * 0.55 }));
+  // parmak
+  const fx = gx + gw * 0.62, fy = gy + gw * 0.75, press = ph > 0.1 && ph < 0.72 ? 0.85 : 1;
+  ctx.save(); ctx.globalAlpha = alpha;
+  ctx.beginPath(); ctx.arc(fx, fy, 22 * press, 0, Math.PI * 2); ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = '#7a5a3c'; ctx.stroke();
+  ctx.beginPath(); ctx.arc(fx, fy, 8 * press, 0, Math.PI * 2); ctx.fillStyle = '#7a5a3c'; ctx.fill();
+  ctx.restore();
+}
+function drawSpecialFace(kind, w, h, r, c) {
+  const sp = SP[kind], col = sp.col, t = performance.now() / 1000, ph = ((c.id || 0) * 0.37) % 1;
+  // nabız parlaması
+  ctx.save();
+  ctx.shadowColor = col; ctx.shadowBlur = w * (0.1 + 0.08 * Math.sin(t * 3 + ph * 6));
+  rr(-w / 2, -h / 2, w, h, r); ctx.fillStyle = '#2b2438'; ctx.fill();
+  ctx.restore();
+  // zemin: koyu mürdümden kartın koyu tonuna geçiş (normal pastel kartlardan ayrışsın)
+  const g = ctx.createLinearGradient(0, -h / 2, 0, h / 2);
+  g.addColorStop(0, '#2b2438'); g.addColorStop(1, sp.dk);
+  rr(-w / 2, -h / 2, w, h, r); ctx.fillStyle = g; ctx.fill();
+  // kayan ışık şeridi
+  ctx.save(); rr(-w / 2, -h / 2, w, h, r); ctx.clip();
+  const sweep = ((t / 2.8 + ph) % 1) * 2.6 - 0.8;
+  ctx.translate(sweep * w, 0); ctx.rotate(0.45);
+  const sg = ctx.createLinearGradient(-w * 0.18, 0, w * 0.18, 0);
+  sg.addColorStop(0, 'rgba(255,255,255,0)'); sg.addColorStop(0.5, 'rgba(255,255,255,0.22)'); sg.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = sg; ctx.fillRect(-w * 0.18, -h, w * 0.36, h * 2);
+  ctx.restore();
+  // çerçeve
+  rr(-w / 2, -h / 2, w, h, r);
+  ctx.lineWidth = Math.max(1.5, w * 0.05); ctx.strokeStyle = col; ctx.stroke();
+  rr(-w / 2 + w * 0.08, -h / 2 + w * 0.08, w * 0.84, h - w * 0.16, r * 0.7);
+  ctx.strokeStyle = 'rgba(255,255,255,0.16)'; ctx.lineWidth = w * 0.025; ctx.stroke();
+  // parıltılar
+  if (w > 50) {
+    [[-0.3, -0.36, 0], [0.32, 0.3, 1.7], [0.28, -0.3, 3.1]].forEach(([sx, sy, o]) => {
+      const k = Math.max(0, Math.sin(t * 2.4 + o + ph * 6));
+      if (k > 0.05) sparkle(sx * w, sy * h, w * 0.07 * k, sp.f, null);
+    });
+  }
+  // ikon
+  const s = w * 0.36, bob = Math.sin(t * 2 + ph * 6) * w * 0.015;
+  ctx.save(); ctx.translate(0, bob);
+  ICONS[kind](s, sp);
+  ctx.restore();
+}
+function sparkle(x, y, s, fill, stroke) {
+  ctx.save(); ctx.translate(x, y);
+  ctx.beginPath();
+  for (let i = 0; i < 8; i++) {
+    const a = i * Math.PI / 4 - Math.PI / 2, rad = i % 2 ? s * 0.32 : s;
+    (i ? ctx.lineTo : ctx.moveTo).call(ctx, Math.cos(a) * rad, Math.sin(a) * rad);
+  }
+  ctx.closePath();
+  ctx.fillStyle = fill; ctx.fill();
+  if (stroke) { ctx.lineWidth = Math.max(1, s * 0.22); ctx.strokeStyle = stroke; ctx.globalAlpha *= 0.6; ctx.stroke(); }
+  ctx.restore();
+}
+// İkonlar oyunun kart stilinde: pastel dolgu, koyu çerçeve, beyaz parlama
+function iconCard(x, y, cw, ch, rot, fill, stroke, lw) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
+  rr(-cw / 2, -ch / 2, cw, ch, cw * 0.22); ctx.fillStyle = fill; ctx.fill();
+  ctx.lineWidth = lw; ctx.strokeStyle = stroke; ctx.stroke();
+  rr(-cw / 2 + lw, -ch / 2 + lw, cw - 2 * lw, ch * 0.32, cw * 0.16); ctx.fillStyle = 'rgba(255,255,255,0.45)'; ctx.fill();
+  ctx.restore();
+}
+function pip(x, y, r, color) { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill(); }
+function arrowPath(s, d) {
+  const P = [[0, -1.05], [0.95, -0.05], [0.4, -0.05], [0.4, 0.95], [-0.4, 0.95], [-0.4, -0.05], [-0.95, -0.05]];
+  ctx.beginPath();
+  P.forEach(([px, py], i) => (i ? ctx.lineTo : ctx.moveTo).call(ctx, px * s, py * s * d));
+  ctx.closePath();
+}
+const ICONS = {
+  // Joker Merge: iki aynı kart birleşiyor (aynı değer)
+  jmerge(s, sp) {
+    const lw = s * 0.13, cw = s * 0.95, ch = s * 1.3;
+    iconCard(-s * 0.32, s * 0.05, cw, ch, -0.22, '#fff3cf', sp.col, lw);
+    pip(-s * 0.36, s * 0.07, s * 0.15, sp.col);
+    iconCard(s * 0.32, s * 0.05, cw, ch, 0.22, sp.m, sp.col, lw);
+    pip(s * 0.36, s * 0.07, s * 0.15, sp.col);
+    sparkle(0, -s * 0.85, s * 0.34, '#ffffff', sp.col);
+  },
+  // Joker Sort: önde bir eksik kart (2 nokta -> 1 nokta), solitaire dizilimi
+  jsort(s, sp) {
+    const lw = s * 0.13, cw = s * 1.0, ch = s * 1.32;
+    iconCard(-s * 0.2, -s * 0.28, cw, ch, 0, '#e3f8fa', sp.col, lw);
+    pip(-s * 0.36, -s * 0.62, s * 0.11, sp.col); pip(-s * 0.04, -s * 0.62, s * 0.11, sp.col);
+    iconCard(s * 0.2, s * 0.3, cw, ch, 0, sp.m, sp.col, lw);
+    pip(s * 0.2, s * 0.3, s * 0.16, '#ffffff'); pip(s * 0.2, s * 0.3, s * 0.1, sp.col);
+  },
+  // Upgrade: tombul yukarı ok
+  up(s, sp) {
+    ctx.lineJoin = 'round'; arrowPath(s, 1);
+    ctx.fillStyle = sp.m; ctx.fill(); ctx.lineWidth = s * 0.15; ctx.strokeStyle = sp.col; ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-s * 0.2, s * 0.7); ctx.lineTo(-s * 0.2, s * 0.05);
+    ctx.lineCap = 'round'; ctx.lineWidth = s * 0.12; ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.stroke();
+  },
+  // Downgrade: tombul aşağı ok
+  down(s, sp) {
+    ctx.lineJoin = 'round'; arrowPath(s, -1);
+    ctx.fillStyle = sp.m; ctx.fill(); ctx.lineWidth = s * 0.15; ctx.strokeStyle = sp.col; ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-s * 0.2, -s * 0.7); ctx.lineTo(-s * 0.2, -s * 0.05);
+    ctx.lineCap = 'round'; ctx.lineWidth = s * 0.12; ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.stroke();
+  },
+  // Blast: sevimli bomba, fitil ve kıvılcım
+  blast(s, sp) {
+    const t = performance.now() / 1000;
+    ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(s * 0.32, -s * 0.42); ctx.quadraticCurveTo(s * 0.55, -s * 0.95, s * 0.88, -s * 0.78);
+    ctx.lineWidth = s * 0.12; ctx.strokeStyle = '#e6c08f'; ctx.stroke();
+    rr(s * 0.14, -s * 0.6, s * 0.36, s * 0.3, s * 0.06); ctx.fillStyle = '#c9b8e3'; ctx.fill();
+    ctx.lineWidth = s * 0.09; ctx.strokeStyle = '#efe6fb'; ctx.stroke();
+    ctx.beginPath(); ctx.arc(-s * 0.05, s * 0.18, s * 0.68, 0, Math.PI * 2);
+    ctx.fillStyle = '#b4a0d4'; ctx.fill(); ctx.lineWidth = s * 0.13; ctx.strokeStyle = '#efe6fb'; ctx.stroke();
+    ctx.beginPath(); ctx.arc(-s * 0.28, -s * 0.06, s * 0.2, Math.PI * 1.05, Math.PI * 1.75);
+    ctx.lineWidth = s * 0.12; ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.stroke();
+    sparkle(s * 0.9, -s * 0.8, s * (0.36 + 0.08 * Math.sin(t * 12)), '#ffe08a', sp.col);
+  }
+};
 function glow(x, y, w, h, strong) {
   ctx.save();
   ctx.shadowColor = 'rgba(80,220,232,0.9)'; ctx.shadowBlur = strong ? 24 : 12;
@@ -523,25 +1011,105 @@ function wrap(str, x, y, maxW, lh) {
   ctx.fillText(line, x, y);
   return y + lh;
 }
+function chevron(b, dir, enabled) {
+  ctx.save();
+  ctx.globalAlpha = enabled ? 1 : 0.35;
+  ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2); ctx.fillStyle = '#f1e1cd'; ctx.fill();
+  ctx.strokeStyle = '#9a7a5a'; ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(b.x + 3 * dir * -1, b.y - 6); ctx.lineTo(b.x + 3 * dir, b.y); ctx.lineTo(b.x + 3 * dir * -1, b.y + 6);
+  ctx.stroke();
+  ctx.restore();
+}
+function drawLock(cx, cy, s, color) {
+  ctx.save(); ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = s * 0.16;
+  ctx.beginPath(); ctx.arc(cx, cy - s * 0.12, s * 0.3, Math.PI, 0); ctx.stroke();
+  rr(cx - s * 0.45, cy - s * 0.12, s * 0.9, s * 0.7, s * 0.14); ctx.fill();
+  ctx.restore();
+}
 function drawHeader() {
-  rr(34, 34, 96, 34, 17); ctx.fillStyle = '#efdcc4'; ctx.fill();
-  text('Target', 72, 52, 17, '#a07d5b', 600);
-  drawCard({ x: 112, y: 22, w: 44, v: S.target, pop: S.tpop, shake: 0, rot: 0.2, alpha: 1 });
-  text('Stage ' + S.stage, 270, 48, 26, '#8a6a4c', 700);
-  PLUS.x = 270 + ctx.measureText('Stage ' + S.stage).width / 2 + 24;
-  ctx.beginPath(); ctx.arc(PLUS.x, PLUS.y, PLUS.r, 0, Math.PI * 2); ctx.fillStyle = '#5cbf7c'; ctx.fill();
-  ctx.strokeStyle = '#fff'; ctx.lineWidth = 3.5; ctx.lineCap = 'round'; ctx.beginPath();
-  ctx.moveTo(PLUS.x - 6, PLUS.y); ctx.lineTo(PLUS.x + 6, PLUS.y); ctx.moveTo(PLUS.x, PLUS.y - 6); ctx.lineTo(PLUS.x, PLUS.y + 6); ctx.stroke();
-  text(`Cards 1–${S.maxRand}   Best ${best}`, 270, 78, 14, '#b39373', 500);
+  const endless = S.mode === 'endless', half = TOG.w / 2;
+  rr(TOG.x, TOG.y, TOG.w, TOG.h, 17); ctx.fillStyle = '#efdcc4'; ctx.fill();
+  rr(TOG.x + 3 + (endless ? half : 0), TOG.y + 3, half - 6, TOG.h - 6, 14); ctx.fillStyle = '#fffaf4'; ctx.fill();
+  text('Level', TOG.x + half / 2, TOG.y + TOG.h / 2 + 1, 14, endless ? '#b39373' : '#7a5a3c', 600);
+  text('Endless', TOG.x + half * 1.5, TOG.y + TOG.h / 2 + 1, 14, endless ? '#7a5a3c' : '#b39373', 600);
+
+  if (endless) {
+    text('Stage ' + S.stage, 270, 48, 26, '#8a6a4c', 700);
+    NAV.prev.x = NAV.next.x = -100;
+  } else {
+    const title = 'Level ' + (S.li + 1);
+    text(title, 270, 48, 26, '#8a6a4c', 700);
+    const tw = ctx.measureText(title).width;
+    NAV.prev.x = 270 - tw / 2 - 26; NAV.next.x = 270 + tw / 2 + 26;
+    chevron(NAV.prev, -1, S.li > 0);
+    chevron(NAV.next, 1, S.li < LEVELS.length - 1);
+  }
+
   for (const b of BTNS) {
-    ctx.beginPath(); ctx.arc(b.x, b.y, 19, 0, Math.PI * 2); ctx.fillStyle = '#f1e1cd'; ctx.fill();
+    const hl = b.id === 'help' && S.hint && !S.help;
+    if (hl) {   // help butonu sinyali: nabız gibi atan halka
+      const t = performance.now() / 1000, ph = (t * 1.1) % 1;
+      ctx.save();
+      ctx.globalAlpha = 1 - ph; ctx.strokeStyle = '#3fd3e0'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(b.x, b.y, 20 + ph * 12, 0, Math.PI * 2); ctx.stroke();
+      ctx.globalAlpha = 1; ctx.shadowColor = 'rgba(63,211,224,0.9)'; ctx.shadowBlur = 10 + 6 * Math.sin(t * 6);
+      ctx.beginPath(); ctx.arc(b.x, b.y, 19 * (1 + 0.06 * Math.sin(t * 6)), 0, Math.PI * 2); ctx.fillStyle = '#d4f5f8'; ctx.fill();
+      ctx.restore();
+    } else {
+      ctx.beginPath(); ctx.arc(b.x, b.y, 19, 0, Math.PI * 2); ctx.fillStyle = '#f1e1cd'; ctx.fill();
+    }
     const g = b.id === 'help' ? '?' : b.id === 'sound' ? '♪' : '↻';
-    text(g, b.x, b.y + 1, b.id === 'restart' ? 22 : 19, '#9a7a5a', 700);
+    text(g, b.x, b.y + 1, b.id === 'restart' ? 22 : 19, hl ? '#1f9fb2' : '#9a7a5a', 700);
     if (b.id === 'sound' && muted) {
       ctx.strokeStyle = '#c0634f'; ctx.lineWidth = 2.5; ctx.beginPath();
       ctx.moveTo(b.x - 10, b.y + 10); ctx.lineTo(b.x + 10, b.y - 10); ctx.stroke();
     }
   }
+  if (endless) drawEndlessRow();
+  else drawProgress();   // tek hedefli levellarda da
+}
+function labelCard(label, x, align, v, pop, ghost) {
+  const y = 108, w = 26, h = w * RATIO;
+  ctx.font = `600 16px ${FONT}`;
+  const lw = ctx.measureText(label).width, total = lw + 10 + w;
+  const x0 = align === 'left' ? x : align === 'right' ? x - total : x - total / 2;
+  text(label, x0, y, 16, '#a07d5b', 600, 'left');
+  drawCard({ x: x0 + lw + 10, y: y - h / 2, w, v, pop, shake: 0, mini: true, ghost });
+}
+function drawEndlessRow() {
+  labelCard('Target', 40, 'left', S.target, S.tpop, false);
+  labelCard('Best score', 500, 'right', bestCard || '–', S.mpop, true);
+  ctx.beginPath(); ctx.arc(CHEAT.x, CHEAT.y, CHEAT.r, 0, Math.PI * 2); ctx.fillStyle = '#5cbf7c'; ctx.fill();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 3.5; ctx.lineCap = 'round'; ctx.beginPath();
+  ctx.moveTo(CHEAT.x - 6, CHEAT.y); ctx.lineTo(CHEAT.x + 6, CHEAT.y);
+  ctx.moveTo(CHEAT.x, CHEAT.y - 6); ctx.lineTo(CHEAT.x, CHEAT.y + 6); ctx.stroke();
+}
+function drawSingleTarget() {
+  labelCard('Target', 270, 'center', S.lv.targets[0], S.tpop, false);
+}
+function drawProgress() {
+  const T = S.lv.targets, n = T.length, x1 = 470, y = 108;
+  text('Target', 40, y, 16, '#a07d5b', 600, 'left');
+  const x0 = 40 + ctx.measureText('Target').width + 16;
+  rr(x0, y - 5, x1 - x0, 10, 5); ctx.fillStyle = '#efdcc4'; ctx.fill();
+  if (S.prog > 0.002) { rr(x0, y - 5, (x1 - x0) * S.prog, 10, 5); ctx.fillStyle = '#5cbf7c'; ctx.fill(); }
+  T.forEach((t, k) => {
+    const nx = x0 + (x1 - x0) * (k + 1) / n, w = 26;
+    const doneK = k < S.ti, cur = k === S.ti;
+    if (cur) {
+      ctx.save(); ctx.strokeStyle = '#62dbe6'; ctx.lineWidth = 3;
+      ctx.globalAlpha = 0.55 + 0.45 * Math.sin(performance.now() / 260);
+      rr(nx - w / 2 - 4, y - w * RATIO / 2 - 4, w + 8, w * RATIO + 8, 8); ctx.stroke(); ctx.restore();
+    }
+    drawCard({ x: nx - w / 2, y: y - w * RATIO / 2, w, v: t, pop: 0, shake: 0, mini: true, alpha: doneK || cur ? 1 : 0.5 });
+    if (doneK) {
+      ctx.beginPath(); ctx.arc(nx + w / 2 - 1, y + w * RATIO / 2 - 3, 8, 0, Math.PI * 2); ctx.fillStyle = '#5cbf7c'; ctx.fill();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.2; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.beginPath();
+      const cx = nx + w / 2 - 1, cy = y + w * RATIO / 2 - 3;
+      ctx.moveTo(cx - 3.5, cy); ctx.lineTo(cx - 1, cy + 2.5); ctx.lineTo(cx + 3.5, cy - 2.5); ctx.stroke();
+    }
+  });
 }
 function easeOutBack(x) { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); }
 
@@ -556,16 +1124,33 @@ function draw() {
   drawHeader();
 
   const L = layout();
-  for (let si = 0; si < L.n; si++) { rr(L.xs[si], L.ys[si], L.cw, L.ch, L.cw * 0.16); ctx.fillStyle = '#f2e4d4'; ctx.fill(); }
+  for (let si = 0; si < L.n; si++) {
+    const x = L.xs[si], y = L.ys[si];
+    rr(x, y, L.cw, L.ch, L.cw * 0.16);
+    if (S.locked[si]) {
+      ctx.fillStyle = '#ead8c2'; ctx.fill();
+      ctx.save(); ctx.setLineDash([6, 5]); ctx.strokeStyle = '#d2b998'; ctx.lineWidth = 2; ctx.stroke(); ctx.restore();
+      drawLock(x + L.cw / 2, y + L.ch * 0.27, L.cw * 0.26, '#c2a483');
+      const mw = L.cw * 0.4;
+      drawCard({ x: x + L.cw / 2 - mw / 2, y: y + L.ch * 0.47, w: mw, v: S.locked[si], pop: 0, shake: 0, mini: true, ghost: true });
+    } else {
+      ctx.fillStyle = '#f2e4d4'; ctx.fill();
+      if (S.unpop[si] > 0) {
+        ctx.save(); ctx.globalAlpha = S.unpop[si];
+        ctx.shadowColor = '#ffd166'; ctx.shadowBlur = 20; ctx.strokeStyle = '#ffd166'; ctx.lineWidth = 4;
+        rr(x - 3, y - 3, L.cw + 6, L.ch + 6, L.cw * 0.18); ctx.stroke(); ctx.restore();
+      }
+    }
+  }
 
   const active = (drag && drag.moved) ? drag.from : S.sel;
-  if (active && !S.busy && !S.over) {
+  if (active && !S.busy && !S.end) {
     let hov = -1;
     if (drag && drag.moved) { const c0 = drag.cards[0]; hov = slotAt(c0.x + c0.w / 2, c0.y + c0.w * 0.5); }
     for (let si = 0; si < L.n; si++) {
       if (!legal(active, si)) continue;
       const st = S.slots[si], off = stackOff(L, si, st.length);
-      glow(L.xs[si], L.ys[si] + Math.max(0, st.length - 1) * off, L.cw, L.ch, si === hov);
+      glow(L.xs[si], stackY(L, si, Math.max(0, st.length - 1), off), L.cw, L.ch, si === hov);
     }
   }
 
@@ -575,8 +1160,9 @@ function draw() {
     else st.forEach(c => { if (!c.drag) drawCard(c); });
   });
   late.forEach(st => st.forEach(c => { if (!c.drag) drawCard(c); }));
-  S.hand.forEach(c => { if (c && !c.drag) drawCard(c); });
-  fx.forEach(drawCard);
+  S.hand.forEach(it => it && it.cards.forEach(c => { if (!c.drag) drawCard(c); }));
+  S.fly.forEach(drawCard);
+  S.ghosts.forEach(drawCard);
   if (drag) drag.cards.forEach(drawCard);
 
   parts.forEach(p => {
@@ -591,70 +1177,147 @@ function draw() {
     ctx.fillStyle = t.color; ctx.fillText(t.text, t.x, t.y);
   });
   ctx.globalAlpha = 1;
+  if (tutStep() && !S.end) drawTutorialGuide();
 
   if (S.banner) {
     const t = S.banner.t;
-    const a = t < 0.12 ? t / 0.12 : t > 1.2 ? Math.max(0, (1.5 - t) / 0.3) : 1;
+    const a = t < 0.12 ? t / 0.12 : t > 1.3 ? Math.max(0, (1.6 - t) / 0.3) : 1;
     const sc = t < 0.22 ? 0.6 + 0.4 * easeOutBack(t / 0.22) : 1;
-    const p = pal(S.target - 1);
+    const p = pal(S.target);
     ctx.save(); ctx.globalAlpha = a; ctx.translate(LW / 2, BOARD.y + BOARD.h - 90); ctx.scale(sc, sc);
-    rr(-150, -46, 300, 92, 28); ctx.fillStyle = 'rgba(255,255,255,0.94)'; ctx.fill();
+    rr(-170, -46, 340, 92, 28); ctx.fillStyle = 'rgba(255,255,255,0.94)'; ctx.fill();
     ctx.lineWidth = 4; ctx.strokeStyle = p.b; ctx.stroke();
-    text(S.banner.text, 0, -12, 34, '#7a5a3c', 700);
+    text(S.banner.text, 0, -12, 30, '#7a5a3c', 700);
     text(S.banner.sub, 0, 22, 18, p.t, 600);
     ctx.restore();
   }
 
   if (S.help) drawHelp();
-  if (S.over) drawOver();
+  if (S.intro) drawIntro();
+  if (S.end) drawEnd();
+}
+// Help: kuralları mini kart illüstrasyonlarıyla gösterir. Desteler arkadan öne yazılır (ör. [3, 2] -> 2 önde).
+const HELP_ROWS = [
+  { cap: 'Two equal cards merge into the next one', a: [2], b: [2], r: [3] },
+  { cap: 'A card stacks on a card one higher', a: [2], b: [3], r: [3, 2] },
+  { cap: 'Stacks can go on stacks', a: [3, 2], b: [6, 5, 4], r: [6, 5, 4, 3, 2] },
+  { cap: 'Stacks merge too', a: [3, 2], b: [3], r: [4, 2] }
+];
+const HC = { w: 40, off: 15 };
+function stackH(n) { return HC.w * RATIO + (n - 1) * HC.off; }
+function miniCard(v, x, y, alpha = 1) {
+  const c = { x, y, w: HC.w, v, pop: 0, shake: 0, mini: true, peek: true, alpha };
+  if (typeof v === 'string') { c.kind = v; c.v = 0; }
+  drawCard(c);
+}
+function miniStack(vals, x, y) {
+  if (!vals.length) { rr(x, y, HC.w, HC.w * RATIO, HC.w * 0.16); ctx.fillStyle = '#f2e4d4'; ctx.fill(); return; }
+  vals.forEach((v, i) => miniCard(v, x, y + i * HC.off));
+}
+function opSign(kind, cx, cy) {
+  ctx.save(); ctx.strokeStyle = '#c2a483'; ctx.lineWidth = 4; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.beginPath();
+  if (kind === '+') { ctx.moveTo(cx - 8, cy); ctx.lineTo(cx + 8, cy); ctx.moveTo(cx, cy - 8); ctx.lineTo(cx, cy + 8); }
+  else { ctx.moveTo(cx - 11, cy); ctx.lineTo(cx + 11, cy); ctx.moveTo(cx + 4, cy - 7); ctx.lineTo(cx + 11, cy); ctx.lineTo(cx + 4, cy + 7); }
+  ctx.stroke(); ctx.restore();
+}
+// Taşıma ipucu: soldaki deste kavis çizerek sağdakinin önüne gider (kesikli ok + hareket eden hayalet deste)
+function moveHint(row, ax, bx, top, k) {
+  const sx = ax + HC.w / 2, sy = top - 4;
+  const ex = bx + HC.w / 2, ey = top + (row.b.length - 1) * HC.off - 4;
+  const cx = (sx + ex) / 2, cy = Math.min(sy, ey) - 34;
+  ctx.save();
+  ctx.strokeStyle = '#c2a483'; ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.setLineDash([5, 6]);
+  ctx.beginPath(); ctx.moveTo(sx, sy); ctx.quadraticCurveTo(cx, cy, ex, ey - 6); ctx.stroke();
+  ctx.setLineDash([]);
+  const ang = Math.atan2(ey - 6 - cy, ex - cx);
+  ctx.beginPath();
+  ctx.moveTo(ex + Math.cos(ang - 2.5) * 9, ey - 6 + Math.sin(ang - 2.5) * 9);
+  ctx.lineTo(ex, ey - 6);
+  ctx.lineTo(ex + Math.cos(ang + 2.5) * 9, ey - 6 + Math.sin(ang + 2.5) * 9);
+  ctx.stroke();
+  ctx.restore();
+  // hayalet: deste yay boyunca kayıp sağdakinin önüne oturur
+  const t = ((performance.now() / 1700) + k * 0.18) % 1;
+  if (t < 0.75) {
+    const u = Math.min(1, t / 0.6), e = u * u * (3 - 2 * u);
+    const lx = bx, ly = top + row.b.length * HC.off;           // inişte arka kartın konumu
+    const qx = (ax + lx) / 2, qy = Math.min(top, ly) - 40;
+    const gx = (1 - e) * (1 - e) * ax + 2 * (1 - e) * e * qx + e * e * lx;
+    const gy = (1 - e) * (1 - e) * top + 2 * (1 - e) * e * qy + e * e * ly;
+    const alpha = 0.55 * Math.min(1, t / 0.08) * (t > 0.6 ? Math.max(0, (0.75 - t) / 0.15) : 1);
+    row.a.forEach((v, i) => miniCard(v, gx, gy + i * HC.off, alpha));
+  }
 }
 function drawHelp() {
   ctx.fillStyle = 'rgba(70,48,32,0.45)'; ctx.fillRect(0, 0, LW, LH);
-  rr(40, 140, 460, 620, 30); ctx.fillStyle = '#fbf4ec'; ctx.fill();
-  text('How to play', LW / 2, 196, 30, '#7a5a3c', 700);
-  const lines = [
-    [1, 'Drag cards from the bottom into the slots. You can also tap a card, then tap a slot.'],
-    [2, 'A card goes into an empty slot, in front of a card 1 higher, or in front of the same number.'],
-    [3, 'Matching numbers merge into the next number, and merges chain automatically.'],
-    [5, 'Reach the target to clear a stage: the target and new cards go up by 1, and every 3 stages add a slot.'],
-    [6, 'Move the front run of consecutive cards (e.g. 1-2-3) to another slot as a group.'],
-    [7, 'If no bottom card can fit, even after moving stacks, the game ends.']
-  ];
-  let y = 252;
-  ctx.font = `500 18px ${FONT}`; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-  for (const [v, s] of lines) {
-    const p = pal(v);
-    rr(66, y - 13, 20, 26, 6); ctx.fillStyle = p.f; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = p.b; ctx.stroke();
-    ctx.font = `500 18px ${FONT}`; ctx.fillStyle = '#7a5f48'; ctx.textAlign = 'left';
-    y = wrap(s, 100, y, 370, 25) + 12;
-  }
+  rr(36, 72, 468, 752, 30); ctx.fillStyle = '#fbf4ec'; ctx.fill();
+  text('Tutorial', LW / 2, 120, 30, '#7a5a3c', 700);
+  ctx.beginPath(); ctx.arc(462, 112, 19, 0, Math.PI * 2); ctx.fillStyle = '#f1e1cd'; ctx.fill();   // bilgi ekranı işareti
+  text('?', 462, 113, 20, '#9a7a5a', 700);
+  let y = 172;
+  HELP_ROWS.forEach((row, k) => {
+    if (k) { ctx.fillStyle = '#efe2d2'; ctx.fillRect(70, y - 10, 400, 2); }
+    text(row.cap, LW / 2, y + 10, 17, '#7a5f48', 600);
+    const top = y + 46, hMax = Math.max(stackH(row.a.length), stackH(row.b.length), stackH(row.r.length));
+    const total = HC.w * 3 + 40 * 2 + 16, x0 = LW / 2 - total / 2, mid = top + HC.w * RATIO / 2;
+    exampleRow(row, x0, top, mid, k);
+    y = top + hMax + 16;
+  });
   const b = HELP_BTN;
   rr(b.x, b.y, b.w, b.h, 30); ctx.fillStyle = '#5cbf7c'; ctx.fill();
-  text(seen || store.get('sm_seen', '0') === '1' ? 'Continue' : 'Start', b.x + b.w / 2, b.y + b.h / 2 + 1, 24, '#fff', 700);
+  text('Play', b.x + b.w / 2, b.y + b.h / 2 + 1, 24, '#fff', 700);
 }
-function drawOver() {
-  const a = S.overT;
+function exampleRow(row, x0, top, mid, k) {
+  miniStack(row.a, x0, top);
+  miniStack(row.b, x0 + HC.w + 40, top);
+  moveHint(row, x0, x0 + HC.w + 40, top, k);
+  opSign('>', x0 + HC.w * 2 + 68, mid);
+  miniStack(row.r, x0 + HC.w * 2 + 56 + 40, top);
+}
+// Yeni özellik / kart tanıtımı
+function drawIntro() {
+  const sp = SP[S.intro];
+  ctx.fillStyle = 'rgba(70,48,32,0.5)'; ctx.fillRect(0, 0, LW, LH);
+  rr(36, 150, 468, 616, 30); ctx.fillStyle = '#fbf4ec'; ctx.fill();
+  text(sp.title, LW / 2, 196, 30, '#7a5a3c', 700);
+  const t = performance.now() / 1000, bw = 96;
+  drawCard({ x: LW / 2 - bw / 2, y: 236 + Math.sin(t * 2) * 4, w: bw, v: 0, kind: S.intro, pop: 0, shake: 0, rot: Math.sin(t * 1.5) * 0.05 });
+  text(sp.name, LW / 2, 412, 26, '#7a5a3c', 700);
+  ctx.font = `500 18px ${FONT}`; ctx.fillStyle = '#8a6f56'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  wrap(sp.desc, LW / 2, 450, 380, 25);
+  const ex = sp.ex, total = HC.w * 3 + 40 * 2 + 16, x0 = LW / 2 - total / 2, top = 548;
+  exampleRow(ex, x0, top, top + HC.w * RATIO / 2, 0);
+  const b = INTRO_BTN;
+  rr(b.x, b.y, b.w, b.h, 30); ctx.fillStyle = '#5cbf7c'; ctx.fill();
+  text('Got it', b.x + b.w / 2, b.y + b.h / 2 + 1, 24, '#fff', 700);
+}
+function drawEnd() {
+  const a = S.endT, win = S.end === 'win';
   ctx.globalAlpha = a;
   ctx.fillStyle = 'rgba(70,48,32,0.5)'; ctx.fillRect(0, 0, LW, LH);
   ctx.save(); ctx.translate(LW / 2, 460); const sc = 0.85 + 0.15 * easeOutBack(a); ctx.scale(sc, sc); ctx.translate(-LW / 2, -460);
-  rr(70, 300, 400, 330, 30); ctx.fillStyle = '#fbf4ec'; ctx.fill();
-  text('No moves left', LW / 2, 362, 32, '#7a5a3c', 700);
-  text('No card fits, even after moving stacks.', LW / 2, 404, 16, '#a3866a', 500);
-  text('Stage reached: ' + S.stage, LW / 2, 448, 22, '#8a6a4c', 600);
-  text('Best: ' + best, LW / 2, 482, 18, '#b39373', 500);
-  const b = OVER_BTN;
+  rr(70, 330, 400, 260, 30); ctx.fillStyle = '#fbf4ec'; ctx.fill();
+  if (win) {
+    text('Level ' + (S.li + 1) + ' complete!', LW / 2, 388, 32, '#7a5a3c', 700);
+    text(S.lv.targets.length > 1 ? 'All targets reached.' : 'Target reached.', LW / 2, 432, 17, '#a3866a', 500);
+  } else {
+    text('No moves left', LW / 2, 388, 32, '#7a5a3c', 700);
+    text(S.mode === 'endless' ? 'Stage ' + S.stage + '   ·   Score ' + S.maxCard + '   ·   Best ' + bestCard : 'No card fits, even after moving stacks.',
+      LW / 2, 432, S.mode === 'endless' ? 18 : 16, '#a3866a', 500);
+  }
+  const b = END_BTN, last = S.li >= LEVELS.length - 1;
   rr(b.x, b.y, b.w, b.h, 32); ctx.fillStyle = '#5cbf7c'; ctx.fill();
-  text('Play again', b.x + b.w / 2, b.y + b.h / 2 + 1, 24, '#fff', 700);
+  text(win ? (last ? 'Back to level 1' : 'Next level') : 'Retry', b.x + b.w / 2, b.y + b.h / 2 + 1, 24, '#fff', 700);
   ctx.restore();
   ctx.globalAlpha = 1;
 }
 
 // ---------- Başlat ----------
-newGame();
-S.help = !seen;
-let last = performance.now();
+if (store.get('sm_mode', 'level') === 'endless') loadEndless();
+else loadLevel(+store.get('sm_level', 0) || 0);
+let lastT = performance.now();
 function frame(t) {
-  const dt = Math.min(0.05, (t - last) / 1000); last = t;
+  const dt = Math.min(0.05, (t - lastT) / 1000); lastT = t;
   update(dt); draw();
   requestAnimationFrame(frame);
 }
