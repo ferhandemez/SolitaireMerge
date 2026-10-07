@@ -69,7 +69,8 @@ const TUT_STEPS = [
   { from: { type: 'hand', i: 0 }, to: 0, text: 'Drag the 1 onto the other 1' },
   { from: { type: 'slot', si: 0 }, to: 1, text: 'Drag the 2 onto the 3' },
   { from: { type: 'slot', si: 1 }, to: 2, text: 'Drag the 3-2 stack onto the 4' },
-  { from: { type: 'hand', i: 1 }, to: 2, text: 'Drag the 2 onto the stack' }
+  { from: { type: 'hand', i: 1 }, to: 2, text: 'Drag the 2 onto the stack' },
+  { from: { type: 'hand', i: 2 }, to: 'empty', text: 'Drag the 3 into an empty slot' }   // herhangi bir boş slot
 ];
 
 // ---------- Özellikler / özel kartlar ----------
@@ -406,7 +407,8 @@ function tutAllows(from, si) {
   if (!st) return true;
   if (st.from.type !== from.type) return false;
   if (from.type === 'hand' ? from.i !== st.from.i : from.si !== st.from.si) return false;
-  return si == null || si === st.to;
+  if (si == null) return true;
+  return st.to === 'empty' ? !S.slots[si].length && !S.locked[si] : si === st.to;
 }
 function legal(from, si) {
   if (!tutAllows(from, si)) return false;
@@ -853,9 +855,16 @@ function drawTutorialGuide() {
   text(st.text, 300, 195, 18, '#7a5a3c', 600);
   if (S.busy || (drag && drag.moved)) return;
   // hedef slot
-  const dst = S.slots[st.to], off = stackOff(L, st.to, dst.length);
-  const ty = stackY(L, st.to, Math.max(0, dst.length - 1), off);
-  ctx.save(); ctx.globalAlpha = 0.6 + 0.4 * Math.sin(t * 5); glow(L.xs[st.to], ty, L.cw, L.ch, true); ctx.restore();
+  let to = st.to;
+  if (to === 'empty') {   // rehber için kaynağa en yakın boş slot
+    const sx = st.from.type === 'hand' ? handPos(st.from.i).x : L.xs[st.from.si];
+    let bestD = 1e9; to = -1;
+    S.slots.forEach((x, k) => { if (!x.length && !S.locked[k] && Math.abs(L.xs[k] - sx) < bestD) { bestD = Math.abs(L.xs[k] - sx); to = k; } });
+    if (to < 0) return;
+  }
+  const dst = S.slots[to], off = stackOff(L, to, dst.length);
+  const ty = stackY(L, to, Math.max(0, dst.length - 1), off);
+  ctx.save(); ctx.globalAlpha = 0.6 + 0.4 * Math.sin(t * 5); glow(L.xs[to], ty, L.cw, L.ch, true); ctx.restore();
   // kaynak
   let src;
   if (st.from.type === 'hand') { const it = S.hand[st.from.i]; src = it && it.cards; }
@@ -863,7 +872,7 @@ function drawTutorialGuide() {
   if (!src || !src.length) return;
   const c0 = src[0], ph = (t / 1.9) % 1;
   const u = Math.min(1, Math.max(0, (ph - 0.15) / 0.55)), e = u * u * (3 - 2 * u);
-  const ex = L.xs[st.to], ey = stackY(L, st.to, Math.max(0, dst.length - 1), off) + (dst.length ? off : 0);
+  const ex = L.xs[to], ey = stackY(L, to, Math.max(0, dst.length - 1), off) + (dst.length ? off : 0);
   const qx = (c0.x + ex) / 2, qy = Math.min(c0.y, ey) - 60;
   const gx = (1 - e) * (1 - e) * c0.x + 2 * (1 - e) * e * qx + e * e * ex;
   const gy = (1 - e) * (1 - e) * c0.y + 2 * (1 - e) * e * qy + e * e * ey;
